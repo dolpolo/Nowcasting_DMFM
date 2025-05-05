@@ -72,7 +72,8 @@ source("C:/Users/david/Desktop/Thesis/Functions/R/DataPreparation.R")
 # GDP CONTRIBUTION FOR SINGLE COUNTRY TO EA
 # ==============================================================================
 
-GDP_com <- GDP_communality(c("DE", "FR", "IT", "ES"))
+# Incluse EA just for description
+GDP_com <- GDP_communality(c("DE", "FR", "IT", "ES","EA"))
 
 # ==============================================================================
 # COUNTRY NATIONS IN THE DATASET

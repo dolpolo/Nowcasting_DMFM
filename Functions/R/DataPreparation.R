@@ -96,15 +96,21 @@ GDP_communality <- function(country_codes) {
   colnames(comov_melt) <- c("Country1", "Country2", "Correlation")
   
   p3 <- ggplot(comov_melt, aes(x = Country1, y = Country2, fill = Correlation)) +
-    geom_tile(color = "white") +
-    scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                         midpoint = 0.5, limits = c(0, 1), name = "Correlation") +
-    labs(title = "GDP Comovement Between Countries") +
+    geom_tile(color = "black", linewidth = 0.3) +
+    geom_text(aes(label = round(Correlation, 2)), size = 3, color = "black") +
+    scale_fill_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0.5, limits = c(0, 1), name = "Correlation"
+    ) +
+    labs(title = "GDP Comovement Between Countries", x = NULL, y = NULL) +
     theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-          panel.grid = element_blank())
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid = element_blank()
+    )
   
   print(p3)
+  
   
   assign("gdp_results", list(
     data = all_gdp,
