@@ -1,5 +1,7 @@
 # Ignore Folders:
 Data/
+Results/
+Graph/
 
 # History files
 .Rhistory
