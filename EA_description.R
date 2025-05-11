@@ -73,7 +73,7 @@ source("C:/Users/david/Desktop/Thesis/Functions/R/DataPreparation.R")
 # ==============================================================================
 
 # Incluse EA just for description
-GDP_com <- GDP_communality(c("DE", "FR", "IT", "ES","EA"))
+GDP_com <- GDP_communality(c("EA","DE","FR", "IT", "ES"))
 
 # ==============================================================================
 # COUNTRY NATIONS IN THE DATASET

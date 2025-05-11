@@ -61,14 +61,14 @@ source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functi
 source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functions/R/dmfm.initialization.R")
 source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functions/R/kalman.R")
 source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functions/R/dmfm.estimation.R")
-source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functions/R/dmfm.forecast.R")
+source("C:/Users/david/Desktop/University/Master's Thesis/Nowcasting_DMFM/Functions/R/dmfm.results.R")
 
 # ==============================================================================
 # SET PARAMETERS
 # ==============================================================================
 
 # No data for NL and BE in 2024 and afterwards
-countries <- c("DE", "FR", "IT", "ES")
+countries <- c("DE","FR","IT","ES")
 
 # Parameters for the data preparation
 P <- list()
@@ -77,28 +77,40 @@ P$modelM <- "Large"
 P$modelQ <- "Small"
 P$covid_start <- as.Date("2020-03-01")
 P$covid_end <- as.Date("2020-12-01")
-P$EV_dfm <- as.Date("2017-01-01")
-P$Tmax <- 300 
+P$startEV <- as.Date("2017-01-01")
+P$endEV <- as.Date("2025-01-01")
+
+P$Tmax <- 300
 
 # Initial guess for the number of factors
-kmax <- c(4, 15)
+kmax <- c(3, 7)
 
 
 # ==============================================================================
 # STEP 1: PREPARE COUNTRY-SPECIFIC 2D DATASETS
 # ==============================================================================
 
-country_list <- list()
+# Step 1: selezione dei nomi base delle variabili (più correlate al GDP per paese)
+base_names <- select_base_variable_names(countries, P)
 
+# Step 2: filtra le variabili base comuni a tutti i paesi (con suffissi)
+common_vars <- filter_common_variables_across_countries(countries, base_names$monthly, base_names$quarterly)
+
+# Step 3: estrai i nomi base comuni (sono gli stessi per tutti i paesi)
+all_vars <- names(common_vars$monthly[[1]])  # nomi base comuni, senza suffisso
+
+# Step 4: prepara i dati per ogni paese usando solo le variabili comuni
+country_list <- list()
 for (cc in countries) {
-  res <- prepare_country_data(cc, P)
+  res <- prepare_country_data(cc, P, 
+                              selected_vars_m = common_vars$monthly, 
+                              selected_vars_q = common_vars$quarterly)
   country_list[[cc]] <- list(
     Data = res$Data,
     Dates = res$DatesM,
     Series = res$Series
   )
 }
-
 
 # ==============================================================================
 # STEP 2: BUILD TENSOR Y (T × p1 × p2) AND MASK W
@@ -107,10 +119,13 @@ for (cc in countries) {
 tensor <- tensor_data(countries, P)
 Y <- tensor$Y
 W <- tensor$W
+summary(Y)
+
 
 # Demean and Standardize
 std <- standardize_Y(Y)
 Y_std <- std$Y_scaled
+summary(Y_std)
 
 # Verify the percentage of NaN
 nan_percent_Y(Y_std)
@@ -119,12 +134,22 @@ nan_percent_Y(Y_std)
 # STEP 3: ANALYSIS ON FACTORS
 # ==============================================================================
 
+# ---- DMFM ----
 # Number of factors: ER by Yu Yu et al. (JoE, 2021)
 k_hat <- mfm.f(Y_std, W, kmax)
 
 # Number of lags in MAR equation
-f.lag_mar <- factorize_bic_matrix(Y_std, W, k_hat)
-f.lag_mar <- mar_model_selection(Y_std, W, k_hat)
+# f.lag_mar <- mar_model_selection(Y_std, W, k_hat)
+f.lag_mar <- mar_model_selection_auto(Y_std, W, k_hat)
+
+# ---- DFM ----
+# Number of factors: ER by Yu Yu et al. (JoE, 2021)
+# k_hat <- dfm.f.vec(Y_std, W, kmax)
+
+# Number of lags in MAR equation
+# f.lag_mar <- factorize_bic_mar_vec(Y_std, W, k_hat)
+# f.lag_mar <- mar_model_selection_vec(Y_std, W, k_hat)
+
 
 # ==============================================================================
 # STEP 3: LIST OF INPUTS --> . 
@@ -133,11 +158,18 @@ f.lag_mar <- mar_model_selection(Y_std, W, k_hat)
 # Just to try
 # k_hat <- c(3,3)
 
+# ---- DMFM ----
 # Can and Lam imputation
 imp <- mfm.cl(Y_std, W, k_hat)
-
 # Trapin Method (Barigozzi's variant) for initialization
 inputs <- dmfm.na.2.sv(imp$Y_imputed, k_hat, W, t = "dmfm")
+
+
+# ---- DFM ----
+# Can and Lam imputation
+# imp <- mfm.cl.vec(Y_std, W, k_hat)
+# Trapin Method (Barigozzi's variant) for initialization
+# inputs <- dmfm.na.2.sv.vec(imp$Y_imputed, k_hat, W, t = "dmfm")
 
 
 # ==============================================================================
@@ -150,347 +182,147 @@ l.C_str <- inputs$C
 
 plot_factors_tensor(inputs$fs)
 
+# ==============================================================================
+# STEP 5: DMFM ESTIMATION (FULL DATASET)
+# ==============================================================================
+
+# Modello con input Dolp
+out <- dmfm.na.em(
+  . = inputs,
+  Y = Y_std,
+  k = k_hat,
+  W = W,
+  t = "dmfm"
+)
 
 
 # ==============================================================================
-# STEP 4: ESTIMATION
+# STEP 6: ROLLING NOWCAST
 # ==============================================================================
 
-# dmfm.em.llk----
-# Prediction error gaussian log-likelihood used to control the convergence
-# of the EM algorithm. Coincides with Eq.(17) in Barigozzi and Luciani (2022)
-dmfm.em.llk <- function(., Y, t){
-  
-  n <- dim(Y)[1]
-  p <- dim(Y)[-1]
-  
-  if (t=="fv"){
-    V   <- array(0, c(n, prod(p), prod(p)))
-    m <- matrix(0, n, prod(p))
-    llk <- rep(0, n)
-    for (i in 1:n){
-      V[i,,] <- .$CR%*%.$Pf[i,,]%*%t(.$CR) + .$KH
-      m[i,]  <- .$CR%*%vec(.$ff[i,,])
-      llk[i] <- log(det(V[i,,])) + t(vec(Y[i,,])-m[i,])%*%solve(V[i,,])%*%(vec(Y[i,,])-m[i,])
-    }
-  } else {
-    V   <- array(0, c(n, prod(p), prod(p)))
-    m   <- array(0, c(n, p))
-    d   <- rep(0,n)
-    llk <- rep(0, n)
-    for (i in 1:n){
-      V[i,,] <- (.$C%x%.$R)%*%.$Pf[i,,]%*%t(.$C%x%.$R) + .$K%x%.$H
-      m[i,,] <- .$R%*%.$ff[i,,]%*%t(.$C)
-      d[i]   <- log(det(solve(.$Pf[i,,]) + (t(.$C)%*%solve(.$K)%*%.$C)%x%(t(.$R)%*%solve(.$H)%*%.$R))) + log(det(as.matrix(.$Pf[i,,]))) + p[1]*log(det(.$K)) + p[2]*log(det(.$H))
-      llk[i] <- d[i] + t(vec(Y[i,,]-m[i,,]))%*%solve(V[i,,])%*%(vec(Y[i,,]-m[i,,]))
-    }
-  }
-  
-  out <- -0.5*sum(llk) 
-  
-  return(out)
-  
-}
+# ---- DMFM ----
 
-# dmfm.na.em----
-dmfm.na.em <- function(., Y, k, W, t, max.iter = 1000, eps = 1e-04){
-  
-  # Dimensions
-  n <- dim(Y)[1]
-  p <- dim(Y)[-1]
-  
-  # Required matrices: Apply a kronaker on Factor structure
-  M <- matrix(0, k[1]*k[2], k[1]*k[2])
-  for (i in 1:k[1]){
-    for (j in 1:k[2]){
-      i.k1 <- matrix(0, k[1], 1)
-      i.k2 <- matrix(0, k[2], 1)
-      i.k1[i] <- 1
-      i.k2[j] <- 1
-      M <- M + (i.k1%*%t(i.k2))%x%t(i.k1%*%t(i.k2))
-    }
-  }
-  
-  I1 <- diag(k[1])
-  I2 <- diag(k[2])
-  
-  # Selection matrix vectorized 
-  D.w  <- array(0, c(n, p[1]*p[2], p[1]*p[2]))
-  D.wt <- array(0, c(n, p[1]*p[2], p[1]*p[2]))
-  for (i in 1:n){
-    i <- 1
-    D.w[i,,] <- diag(as.vector(vec(W[i,,])))
-    D.wt[i,,] <- diag(as.vector(vec(t(W[i,,]))))
-  }
-  
-  criterion <- T
-  iter <- 0
-  while(criterion && iter < max.iter){
-    cat(sprintf(">>> Iterazione EM: %d\n", iter))
-    
-    # Save parameters previous iteration
-    .. <- .
-    
-    ## MAXIMIZATION STEP ##
-    
-    ## Loadings (R - C) ##
-    R.1 <- matrix(0, p[1]*k[1], p[1]*k[1])
-    R.2 <- matrix(0, p[1]*k[1], 1)
-    C.1 <- matrix(0, p[2]*k[2], p[2]*k[2])
-    C.2 <- matrix(0, p[2]*k[2], 1)
-    # for (i in 1:n){
-    #   Y[i,,][is.na(Y[i,,])] <- 0
-    #   for (r in 1:p[1]){
-    #     for (q in 1:p[1]){
-    #       R.1 <- R.1 + star(t(..$C)%*%D.w[i,(0:(p[2]-1))*p[1]+r,(0:(p[2]-1))*p[1]+q]%*%solve(..$K)%*%..$C, vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,])%x%(E.basis(r,q,p[1],p[1])%*%solve(..$H))
-    #     }
-    #   }
-    #   R.2 <- R.2 + vec((W[i,,]*(solve(..$H)%*%Y[i,,]%*%solve(..$K)))%*%..$C%*%t(matrix(.$fs[i,,],k[1],k[2])))
-    #   
-    #   for (r in 1:p[2]){
-    #     for (q in 1:p[2]){
-    #       C.1 <- C.1 + star(t(..$R)%*%D.wt[i,(0:(p[1]-1))*p[2]+r,(0:(p[1]-1))*p[2]+q]%*%solve(..$H)%*%..$R, M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,])%*%t(M))%x%(E.basis(r,q,p[2],p[2])%*%solve(..$K))
-    #     }
-    #   }
-    #   C.2 <- C.2 + vec(t(W[i,,]*(solve(..$H)%*%Y[i,,]%*%solve(..$K)))%*%..$R%*%matrix(.$fs[i,,],k[1],k[2]))
-    # }
-    # .$R <- matrix(solve(R.1)%*%R.2, p[1], k[1])
-    # .$C <- matrix(solve(C.1)%*%C.2, p[2], k[2])
-    Y[is.na(Y)] <- 0
-    for (i in 1:n){
-      for (r in 1:p[1]){
-        for (q in 1:p[1]){
-          R.1 <- R.1 + star(t(..$C)%*%D.w[i,(0:(p[2]-1))*p[1]+r,(0:(p[2]-1))*p[1]+q]%*%solve(..$K)%*%..$C, vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,])%x%(E.basis(r,q,p[1],p[1])%*%solve(..$H))
-        }
-      }
-      R.2 <- R.2 + vec((W[i,,]*(solve(..$H)%*%Y[i,,]%*%solve(..$K)))%*%..$C%*%t(matrix(.$fs[i,,],k[1],k[2])))
-    }
-    .$R <- matrix(solve(R.1)%*%R.2, p[1], k[1])
-    for (i in 1:n){
-      for (r in 1:p[2]){
-        for (q in 1:p[2]){
-          C.1 <- C.1 + star(t(.$R)%*%D.wt[i,(0:(p[1]-1))*p[2]+r,(0:(p[1]-1))*p[2]+q]%*%solve(..$H)%*%.$R, M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,])%*%t(M))%x%(E.basis(r,q,p[2],p[2])%*%solve(..$K))
-        }
-      }
-      C.2 <- C.2 + vec(t(W[i,,]*(solve(..$H)%*%Y[i,,]%*%solve(..$K)))%*%.$R%*%matrix(.$fs[i,,],k[1],k[2]))
-    }
-    .$C <- matrix(solve(C.1)%*%C.2, p[2], k[2])
-    
-    ## Measurement variance (H - K) ##
-    H. <- matrix(0, p[1], p[1])
-    K. <- matrix(0, p[2], p[2])
-    # for (i in 1:n){
-    #   H. <- H. + t((W[i,,]*Y[i,,])%*%solve(..$K)%*%t(W[i,,]*Y[i,,]))
-    #   H. <- H. - t((W[i,,]*Y[i,,])%*%solve(..$K)%*%t(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C))))
-    #   H. <- H. - t((W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C)))%*%solve(..$K)%*%t(W[i,,]*Y[i,,]))
-    #   H. <- H. + t(star(solve(..$K), D.w[i,,]%*%(.$C%x%.$R)%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(.$C%x%.$R)%*%t(D.w[i,,])))
-    #   H. <- H. + (..$H%*%matrix(1,p[1],p[2])%*%..$K)%*%solve(..$K)%*%t(1-W[i,,])
-    #   
-    #   K. <- K. + t(t(W[i,,]*Y[i,,])%*%solve(..$H)%*%(W[i,,]*Y[i,,]))
-    #   K. <- K. - t(t(W[i,,]*Y[i,,])%*%solve(..$H)%*%(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C))))
-    #   K. <- K. - t(t(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C)))%*%solve(..$H)%*%(W[i,,]*Y[i,,]))
-    #   K. <- K. + t(star(solve(..$H), D.wt[i,,]%*%(.$R%x%.$C)%*%(M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(M))%*%t(.$R%x%.$C)%*%t(D.wt[i,,])))
-    #   K. <- K. + t(1-W[i,,])%*%solve(..$H)%*%(..$H%*%matrix(1,p[1],p[2])%*%..$K)
-    # }
-    # .$H <- diag(diag(H.)/(p[2]*n), p[1], p[1])
-    # .$K <- diag(diag(K.)/(p[1]*n), p[2], p[2])
-    for (i in 1:n){
-      H. <- H. + t((W[i,,]*Y[i,,])%*%solve(..$K)%*%t(W[i,,]*Y[i,,]))
-      H. <- H. - t((W[i,,]*Y[i,,])%*%solve(..$K)%*%t(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C))))
-      H. <- H. - t((W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C)))%*%solve(..$K)%*%t(W[i,,]*Y[i,,]))
-      H. <- H. + t(star(solve(..$K), D.w[i,,]%*%(.$C%x%.$R)%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(.$C%x%.$R)%*%t(D.w[i,,])))
-      H. <- H. + (..$H%*%matrix(1,p[1],p[2])%*%..$K)%*%solve(..$K)%*%t(1-W[i,,])
-    }
-    .$H <- diag(diag(H.)/(p[2]*n), p[1], p[1])
-    for (i in 1:n){
-      K. <- K. + t(t(W[i,,]*Y[i,,])%*%solve(.$H)%*%(W[i,,]*Y[i,,]))
-      K. <- K. - t(t(W[i,,]*Y[i,,])%*%solve(.$H)%*%(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C))))
-      K. <- K. - t(t(W[i,,]*(.$R%*%.$fs[i,,]%*%t(.$C)))%*%solve(.$H)%*%(W[i,,]*Y[i,,]))
-      K. <- K. + t(star(solve(.$H), D.wt[i,,]%*%(.$R%x%.$C)%*%(M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(M))%*%t(.$R%x%.$C)%*%t(D.wt[i,,])))
-      K. <- K. + t(1-W[i,,])%*%solve(.$H)%*%(.$H%*%matrix(1,p[1],p[2])%*%..$K)
-    }
-    .$K <- diag(diag(K.)/(p[1]*n), p[2], p[2])
-    
-    ## VAR parameters (A - B) ##
-    if (t=="fm"){
-      A.1 <- matrix(0, k[1], k[1])
-      A.2 <- matrix(0, k[1], k[1])
-      B.1 <- matrix(0, k[2], k[2])
-      B.2 <- matrix(0, k[2], k[2])
-      # for (i in 2:n){
-      #   A.1 <- A.1 + star(solve(..$Q)%*%..$B, vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])
-      #   A.2 <- A.2 + star(t(..$B)%*%solve(..$Q)%*%..$B, vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,])
-      #   B.1 <- B.1 + star(solve(..$P)%*%..$A, M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])%*%t(M))
-      #   B.2 <- B.2 + star(t(..$A)%*%solve(..$P)%*%..$A, M%*%(vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,]))+.$Ps[i-1,,])%*%t(M))
-      # }
-      # .$A <- A.1%*%solve(A.2)
-      # .$B <- B.1%*%solve(B.2)
-      for (i in 2:n){
-        A.1 <- A.1 + star(solve(..$Q)%*%..$B, vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])
-        A.2 <- A.2 + star(t(..$B)%*%solve(..$Q)%*%..$B, vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,])
-      }
-      .$A <- A.1%*%solve(A.2)
-      for (i in 2:n){
-        B.1 <- B.1 + star(solve(..$P)%*%.$A, M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])%*%t(M))
-        B.2 <- B.2 + star(t(.$A)%*%solve(..$P)%*%.$A, M%*%(vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,]))+.$Ps[i-1,,])%*%t(M))
-      }
-      .$B <- B.1%*%solve(B.2)
-    }else{
-      BA.1 <- matrix(0, prod(k), prod(k))
-      BA.2 <- matrix(0, prod(k), prod(k))
-      for (i in 2:n){
-        BA.1 <- BA.1 + vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,]
-        BA.2 <- BA.2 + vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,]
-      }
-      .$BA <- BA.1%*%solve(BA.2)
-    }
-    
-    ## State variance (P - Q) ##
-    if (t=="fm"){
-      P. <- matrix(0, k[1], k[1])
-      Q. <- matrix(0, k[2], k[2])
-      # for (i in 2:n){
-      #   P.1 <- star(solve(..$Q), (vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,]) )
-      #   P.2 <- star(solve(..$Q)%*%.$B, (vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,]))%*%t(.$A)
-      #   P.3 <- .$A%*%t(star(solve(..$Q)%*%.$B, (vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])))
-      #   P.4 <- .$A%*%star(t(.$B)%*%solve(..$Q)%*%.$B, (vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,]))%*%t(.$A)
-      #   P.  <- P. + P.1 - P.2 - P.3 + P.4
-      #   Q.1 <- star(solve(..$P), M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(M))
-      #   Q.2 <- star(solve(..$P)%*%.$A, M%*%((vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,]))+.$Cs[i-1,,])%*%t(M)))%*%t(.$B)
-      #   Q.3 <- .$B%*%t(star(solve(..$P)%*%.$A, M%*%((vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,]))+.$Cs[i-1,,])%*%t(M))))
-      #   Q.4 <- .$B%*%star(t(.$A)%*%solve(..$P)%*%.$A, M%*%(vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,])%*%t(M))%*%t(.$B)
-      #   Q.  <- Q. + Q.1 - Q.2 - Q.3 + Q.4
-      # }
-      # .$P <- P./((n-1)*k[2])
-      # .$Q <- Q./((n-1)*k[1])
-      for (i in 2:n){
-        P.1 <- star(solve(..$Q), (vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,]) )
-        P.2 <- star(solve(..$Q)%*%.$B, (vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,]))%*%t(.$A)
-        P.3 <- .$A%*%t(star(solve(..$Q)%*%.$B, (vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])))
-        P.4 <- .$A%*%star(t(.$B)%*%solve(..$Q)%*%.$B, (vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,]))%*%t(.$A)
-        P.  <- P. + P.1 - P.2 - P.3 + P.4
-      }
-      .$P <- P./((n-1)*k[2])
-      for (i in 2:n){
-        Q.1 <- star(solve(.$P), M%*%(vec(.$fs[i,,])%*%t(vec(.$fs[i,,]))+.$Ps[i,,])%*%t(M))
-        Q.2 <- star(solve(.$P)%*%.$A, M%*%((vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,]))+.$Cs[i-1,,])%*%t(M)))%*%t(.$B)
-        Q.3 <- .$B%*%t(star(solve(.$P)%*%.$A, M%*%((vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,]))+.$Cs[i-1,,])%*%t(M))))
-        Q.4 <- .$B%*%star(t(.$A)%*%solve(.$P)%*%.$A, M%*%(vec(.$fs[i-1,,])%*%t(vec(.$fs[i-1,,])) + .$Ps[i-1,,])%*%t(M))%*%t(.$B)
-        Q.  <- Q. + Q.1 - Q.2 - Q.3 + Q.4
-      }
-      .$Q <- Q./((n-1)*k[1])
-    }else{
-      QP <- matrix(0, prod(k), prod(k))
-      for (i in 2:n){
-        QP <- QP + vec(.$fs[i,,])%*%t(vec(.$fs[i,,])) + .$Ps[i,,] - (vec(.$fs[i,,])%*%t(vec(.$fs[i-1,,])) + .$Cs[i-1,,])%*%t(.$BA)
-      }
-      .$QP <- QP/(n-1)
-    }
-    
-    ## Expectation step ##
-    O <- lapply(split(W,seq(nrow(W))), function(x){which(vec(x)==1)})
-    if (t=="fm"){
-      kout  <- kalman.na(list(t=.$B%x%.$A,
-                              l=.$C%x%.$R,
-                              q=.$Q%x%.$P,
-                              h=.$K%x%.$H),
-                         apply(Y,1,vec), prod(k),
-                         list(f=vec(.$fs[1,,]),
-                              P=diag(prod(k))),
-                         O)
-    }else{
-      kout  <- kalman.na(list(t=.$BA,
-                              l=.$C%x%.$R,
-                              q=.$QP,
-                              h=.$K%x%.$H),
-                         apply(Y,1,vec), prod(k),
-                         list(f=vec(.$fs[1,,]),
-                              P=diag(prod(k))),
-                         O)
-    }
-    .$ff <- .$fs <- array(0, c(n, k[1], k[2]))
-    .$Pf <- .$Ps <- .$Cs <- array(0, c(n, prod(k), prod(k)))
-    for (i in 1:n){
-      .$ff[i,,] <- matrix(kout$ff[,i],k[1],k[2])
-      .$fs[i,,] <- matrix(kout$fs[,i],k[1],k[2])
-      .$Pf[i,,] <- kout$Pf[,,i]
-      .$Ps[i,,] <- kout$Ps[,,i]
-      .$Cs[i,,] <- kout$Cs[,,i]
-    }
-    
-    ## Check convergence ##
-    llk.old <- dmfm.em.llk(.., Y, t)
-    llk.new <- dmfm.em.llk(., Y, t)
-    delta <- 2*abs(llk.new-llk.old)/abs(llk.new+llk.old)
-    
-    cat(sprintf("Log-likelihood old: %.4f, new: %.4f, delta: %.6f\n", llk.old, llk.new, delta))
-    
-    print(c(llk.old,llk.new,delta))
-    if (delta < eps) {
-      criterion <- F
-      .$Y <- array(0, c(n, p[1], p[2]))
-      for (i in 1:n){
-        .$Y[i,,] <- .$R%*%.$fs[i,,]%*%t(.$C)
-      }
-    }
-    
-    iter <- iter + 1
-    
-  }
-  
-  return(.)
-  
-}
+# Rolling Nowcast
+Y_nowcast <- rolling_nowcast_dmfm(Y_std, W, k = k_hat, t_vec = 276:300)
+nowcasts <- Y_nowcast$nowcasts
 
-apply(W[,,41], 2, sum)  # oppure:
-sum(W[,,41])
+# ---- DFM ----
+
+# Rolling Nowcast
+# Y_nowcast <- rolling_nowcast_dfm(Y_std, W, k = k_hat, t_vec = 276:300)
+# nowcasts <- Y_nowcast$nowcasts
+
 
 # ==============================================================================
-# STEP 4: ROLLING NOWCAST
+# STEP 5: SAVE RESULTS
 # ==============================================================================
 
-rolling_nowcast_dmfm <- function(Y, W, k, t_vec, model_type = "dmfm", max_iter = 1000, eps = 1e-1, target_idx = NULL) {
-  # Y: array [T, p1, p2]
-  # W: array [T, p1, p2]
-  # k: vector c(k1, k2)
-  # t_vec: vector of vintages (e.g. 20:300)
-  # model_type: "dmfm", "fm", "fv"
-  # target_idx: optional list(row, col) to extract specific nowcast
-  
+# save(res,tensor,inputs, std, roll_nowcast, k_hat, W, file = "dmfm_rollnowcastLS_11_201_40var.RData")
+
+# load("dmfm_shiftnowcastLS_11_201_40var.RData")
+
+
+shift_release <- function(Y, W, quarterly_var_indices) {
   T <- dim(Y)[1]
   p1 <- dim(Y)[2]
   p2 <- dim(Y)[3]
+  
+  for (idx in quarterly_var_indices) {
+    for (j in 1:p1) {
+      tmp <- Y[, j, idx]
+      tmp_shifted <- c(NA, tmp[1:(T - 1)])  # shift di 1 mese in avanti
+      Y[, j, idx] <- tmp_shifted
+      W[, j, idx] <- as.numeric(!is.na(tmp_shifted))
+    }
+  }
+  return(list(Y_shifted = Y, W_shifted = W))
+}
+
+nQ <- res$quarterly_start_idx
+
+shift <- shift_release(Y_std,W,nQ)
+Y_s <- shift$Y_shifted
+W_s <- shift$W_shifted
+
+t_vec <- which(res$DatesM >= P$startEV & res$DatesM <= P$endEV)
+
+# Rolling Nowcast
+Y_nowcast <- rolling_nowcast_dmfm(Y_s, W_s, k = k_hat, t_vec = t_vec)
+
+
+
+
+################################################################################
+######### AGGIORNAMENTO NOWCAST MENSILE CONSIDERANDO RELEASES BOZZA ###########
+Y_full <- Y_std
+W_full <- W
+k <- k_hat
+dates <- res$DatesM
+group <- res$Group
+quarterly_var_indices <- res$quarterly_start_idx
+
+rolling_nowcast_dmfm_release <- function(Y_full, W_full, k, dates, group,
+                                         quarterly_var_indices = NULL,
+                                         model_type = "dmfm",
+                                         max_iter = 1000,
+                                         eps = 1e-3,
+                                         target_idx = NULL) {
+  T <- dim(Y_full)[1]
+  p1 <- dim(Y_full)[2]
+  p2 <- dim(Y_full)[3]
+  
+  t_vec <- which(dates >= P$startEV & dates <= P$endEV)
   
   nowcast_list <- list()
   factors_list <- list()
   
   for (t in t_vec) {
-    cat(sprintf("Rolling nowcast at vintage t = %d\n", t))
+    cat(sprintf("Rolling nowcast at vintage t = %d (%s)\n", t, as.character(dates[t])))
     
-    Y_t <- Y[1:t,, , drop = FALSE]
-    W_t <- W[1:t,, , drop = FALSE]
+    #' t = 288 # mese di riferimento per Q(0)
+    #' t = 289
+    #' t = 290
+    #' t = 291 # mese di release per Q(0)
     
-    # Initial values using imputation
+    
+    Y_t <- Y_full[1:t,,, drop = FALSE]
+    W_t <- W_full[1:t,,, drop = FALSE]
+    
+    for (j in 1:p2) {
+      d_j <- group[j]
+      last_obs_time <- t - d_j  # ultimo mese il cui valore è disponibile al tempo t
+      if (last_obs_time < 1) {
+        # Nessuna osservazione disponibile per questa variabile
+        Y_t[, , j] <- NA
+        W_t[, , j] <- 0
+      } else {
+        # Maschera i valori da (last_obs_time + 1) in poi
+        Y_t[(last_obs_time + 1):t, , j] <- NA
+        W_t[(last_obs_time + 1):t, , j] <- 0
+      }
+    }
+    
+    
+    # prova1 <- Y_t[,1,]
+    # prova2 <- Y_t[,1,]
+    # prova3 <- Y_t[,1,]
+    # prova4 <- Y_t[,1,]
+    
+    # --- Inizializzazione EM ---
     imp <- mfm.cl(Y_t, W_t, k)
+    inputs <- dmfm.na.2.sv(imp$Y_imputed, k, W_full, t = model_type)
     
-    # Initial parameters for MFM and MAR
-    inputs <- dmfm.na.2.sv(imp$Y_imputed, k_hat, W, t = "dmfm")
-    
-    # EM estimation
-    fit <- dmfm.na.em(inputs, Y_t, k, W_t, t = model_type, max.iter = max_iter, eps = eps)
+    fit <- dmfm.na.em(inputs, Y = Y_t, k = k, W = W_t, t = model_type,
+                      max.iter = max_iter, eps = eps)
     model <- fit$model
     
-    # Nowcast: filtered factors at time t
     f_t <- model$ff[t,,]
-    
-    # Reconstruct Y_t_hat
     Y_hat <- model$R %*% f_t %*% t(model$C)
     
-    # Store full matrix or only selected entry
-    if (!is.null(target_idx)) {
-      nowcast_value <- Y_hat[target_idx[[1]], target_idx[[2]]]
+    nowcast_value <- if (!is.null(target_idx)) {
+      Y_hat[target_idx[[1]], target_idx[[2]]]
     } else {
-      nowcast_value <- Y_hat
+      Y_hat
     }
     
     nowcast_list[[as.character(t)]] <- nowcast_value
@@ -500,83 +332,478 @@ rolling_nowcast_dmfm <- function(Y, W, k, t_vec, model_type = "dmfm", max_iter =
   return(list(nowcasts = nowcast_list, factors = factors_list))
 }
 
-Y_nowcast <- rolling_nowcast_dmfm(Y_std, W, k = k_hat, t_vec = 290:300)
-
-# Per ottenere i nowcast:
-nowcasts <- Y_nowcast$nowcasts
-
-
-save(res,tensor,inputs, std, Y_nowcast, k_hat, W, file = "dmfm_nowcastMS_11.RData")
 
 
 
+################################################################################
+########################## AGGIORNAMENTO NOWCAST MENSILE CONSIDERANDO RELEASES##
+Y_full <- Y_std
+W_full <- W
+k <- k_hat
+dates <- res$DatesM
+group <- res$Group
+gdp_idx <- res$quarterly_start_idx
 
 
 
+rolling_nowcast_dmfm_by_release <- function(Y_full, W_full, k, dates, group, gdp_idx, 
+                                            model_type = "dmfm", max_iter = 1000, eps = 1e-3,
+                                            t_start, t_end = NULL) {
+  T <- dim(Y_full)[1]
+  if (is.null(t_end)) t_end <- T
+  p1 <- dim(Y_full)[2]
+  p2 <- dim(Y_full)[3]
+  
+  # Output lists for each month in the quarter
+  nowcast_M1 <- list()
+  nowcast_M2 <- list()
+  nowcast_M3 <- list()
+  
+  for (t in seq(t_start, t_end)) {
+    
+    # t = 288
+    # t = 289
+    # t = 290
+    # t = 291 
+    # t = 292
+    
+    cat(sprintf(">>> Rolling nowcast at t = %d (%s)\n", t, as.character(dates[t])))
+    
+    # Subset up to time t
+    Y_t <- Y_full[1:t, , , drop = FALSE]
+    W_t <- W_full[1:t, , , drop = FALSE]
+    
+    # Demean and Standardize
+    std <- standardize_Y(Y_t)
+    Y_t_std <- std$Y_scaled
+    
+    # pre_prova1 <- Y_t_std[,1,]
+    # pre_prova2 <- Y_t_std[,1,]
+    # pre_prova3 <- Y_t_std[,1,]
+    # pre_prova4 <- Y_t_std[,1,]
+    # pre_prova5 <- Y_t_std[,1,]
+    
+    for (j in 1:p2) {
+      freq_j <- group[j]
+      delay <- freq_j - 1
+      release_time <- t - delay
+      
+      if (release_time >= 1) {
+        # Cancelliamo solo le osservazioni future non ancora rilasciate
+        if (release_time + 1 <= t) {
+          Y_t_std[(release_time + 1):t, , j] <- NA
+          W_t[(release_time + 1):t, , j] <- 0
+        }
+        # Le osservazioni precedenti al release_time rimangono
+      } else {
+        # Se la release_time è prima dell'inizio dei dati, maschera tutto
+        Y_t_std[, , j] <- NA
+        W_t[, , j] <- 0
+      }
+    }
+    
+    # prova1 <- Y_t_std[ ,1,]
+    # prova2 <- Y_t_std[ ,1,]
+    # prova3 <- Y_t_std[ ,1,]
+    # prova4 <- Y_t_std[ ,1,]
+    # prova5 <- Y_t_std[ ,1,]
+    
+    
+    # EM Estimation
+    imp <- mfm.cl(Y_t_std, W_t, k)
+    inputs <- dmfm.na.2.sv(imp$Y_imputed, k, W_full, t = model_type)
+    fit <- dmfm.na.em(inputs, Y = Y_t_std, k = k, W = W_t, t = model_type, max.iter = max_iter, eps = eps)
+    model <- fit$model
+    
+    # Reconstruct nowcast from filtered factors
+    f_t <- model$ff[t, , ]
+    Y_hat <- model$R %*% f_t %*% t(model$C)
+    Y_hat_true <- Y_hat * std$sd + std$mean
+    gdp_forecast <- Y_hat[, gdp_idx]
+    
+    # Identify month in the quarter: 1, 2, 3
+    m_trimestre <- ((as.integer(format(dates[t], "%m")) - 1) %% 3) + 1
+    
+    # Save nowcast by quarter month
+    date_str <- as.character(dates[t])
+    if (m_trimestre == 1) {
+      nowcast_M1[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 2) {
+      nowcast_M2[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 3) {
+      nowcast_M3[[date_str]] <- gdp_forecast
+    }
+  }
+  
+  return(list(M1 = nowcast_M1, M2 = nowcast_M2, M3 = nowcast_M3))
+}
+
+roll_nowcast <- rolling_nowcast_dmfm_by_release(Y_full = Y, # lo standardizzo ogni volta?
+                                                W_full = W,
+                                                k = k_hat,
+                                                dates = res$DatesM,
+                                                group = res$Group,
+                                                gdp_idx = res$quarterly_start_idx,
+                                                model_type = "dmfm",
+                                                max_iter = 1000,
+                                                eps = 1e-3,
+                                                t_start = 288,
+                                                t_end = NULL)
 
 
 
-gdp_col <- 41  # esempio: colonna in cui si trova il GDP
-nowcast_gdp <- sapply(Y_nowcast$nowcasts, function(Yhat) Yhat[1, gdp_col])
+# ==============================================================================
+# NOWCAST (FINAL VERSION) Pseudo real time exercise
+# ==============================================================================
 
-plot(as.numeric(names(nowcast_gdp)), nowcast_gdp, type = "l", col = "blue",
-     xlab = "Vintage", ylab = "Nowcast GDP", main = "Nowcast GDP nel tempo")
-# Supponiamo che Y_true siano i dati veri per i mesi 290–300
-Y_real <- Y_std[290:300,,]
+rolling_nowcast_dmfm_by_release <- function(Y_full, W_full, k, dates, group, gdp_idx, 
+                                            startEV, endEV,
+                                            model_type = "dmfm", max_iter = 1000, eps = 1e-3) {
+  T <- dim(Y_full)[1]
+  p1 <- dim(Y_full)[2]
+  p2 <- dim(Y_full)[3]
+  
+  # Calcola gli indici temporali corrispondenti alle date
+  t_start <- which(dates == startEV)
+  t_end <- which(dates == endEV)
+  if (length(t_start) == 0 || length(t_end) == 0) {
+    stop("startEV o endEV non trovate nel vettore dates.")
+  }
+  
+  # Output lists per i tre mesi del trimestre
+  nowcast_M1 <- list()
+  nowcast_M2 <- list()
+  nowcast_M3 <- list()
+  
+  for (t in seq(t_start, t_end)) {
+    cat(sprintf(">>> Rolling nowcast at t = %d (%s)\n", t, as.character(dates[t])))
+    
+    # Subset e maschere release
+    Y_t <- Y_full[1:t, , , drop = FALSE]
+    W_t <- W_full[1:t, , , drop = FALSE]
+    
+    # Standardizza il dataset fino a t
+    std <- standardize_Y(Y_t)
+    Y_t_std <- std$Y_scaled
+    
+    # Applica regole di rilascio
+    for (j in 1:p2) {
+      freq_j <- group[j]
+      delay <- freq_j - 1
+      release_time <- t - delay
+      if (release_time >= 1) {
+        if (release_time + 1 <= t) {
+          Y_t_std[(release_time + 1):t, , j] <- NA
+          W_t[(release_time + 1):t, , j] <- 0
+        }
+      } else {
+        Y_t_std[, , j] <- NA
+        W_t[, , j] <- 0
+      }
+    }
+    
+    # EM Estimation
+    imp <- mfm.cl(Y_t_std, W_t, k)
+    inputs <- dmfm.na.2.sv(imp$Y_imputed, k, W_full, t = model_type)
+    fit <- dmfm.na.em(inputs, Y = Y_t_std, k = k, W = W_t, t = model_type, max.iter = max_iter, eps = eps)
+    model <- fit$model
+    
+    # Ricostruisci il nowcast
+    f_t <- model$ff[t, , ]
+    Y_hat <- model$R %*% f_t %*% t(model$C)
+    Y_hat_true <- Y_hat * std$sd + std$mean
+    gdp_forecast <- Y_hat_true[, gdp_idx]
+    
+    # Salva per il mese del trimestre corrispondente
+    m_trimestre <- ((as.integer(format(dates[t], "%m")) - 1) %% 3) + 1
+    date_str <- as.character(dates[t])
+    if (m_trimestre == 1) {
+      nowcast_M1[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 2) {
+      nowcast_M2[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 3) {
+      nowcast_M3[[date_str]] <- gdp_forecast
+    }
+  }
+  
+  return(list(M1 = nowcast_M1, M2 = nowcast_M2, M3 = nowcast_M3))
+}
 
-# Estrai i nowcast della variabile gdp per i mesi corrispondenti
-vintages <- as.numeric(names(Y_nowcast$nowcasts))
-gdp_nowcast <- sapply(Y_nowcast$nowcasts, function(Yhat) Yhat[1, gdp_col])
-gdp_true <- Y_real[, 1, gdp_col]
-
-# Calcola RMSFE
-rmsfe_gdp <- sqrt(mean((gdp_nowcast - gdp_true)^2, na.rm = TRUE))
-cat("RMSFE GDP =", rmsfe_gdp, "\n")
-
-# Imposta l’indice della variabile e del paese
-row_idx <- 1       # es: primo paese
-col_idx <- 41      # es: colonna in cui si trova GDP (modifica con la tua)
-
-# Vettore dei vintages usati
-vintages <- as.numeric(names(Y_nowcast$nowcasts))
-
-# Estrai nowcast per ogni vintage
-nowcast_series <- sapply(Y_nowcast$nowcasts, function(Yhat) Yhat[row_idx, col_idx])
-
-# Estrai veri valori dallo stesso periodo
-true_series <- Y_std[vintages, row_idx, col_idx]
-
-# Supponiamo che la variabile di interesse sia alla riga 1, colonna 1
-idx_row <- 1
-idx_col <- 41
-
-# Estrai le date dai nomi
-vintages <- as.numeric(names(Y_nowcast$nowcasts))
-
-# Estrai nowcast e veri valori
-nowcast_series <- sapply(Y_nowcast$nowcasts, function(y) y[idx_row, idx_col])
-true_series <- Y_std[vintages, idx_row, idx_col]
-
-df <- data.frame(
-  Date = vintages,  # oppure una sequenza di mesi: seq(as.Date("2000-01-01"), ..., by = "month")
-  Nowcast = nowcast_series,
-  RealGDP = true_series
+roll_nowcast <- rolling_nowcast_dmfm_by_release(
+  Y_full = Y,
+  W_full = W,
+  k = k_hat,
+  dates = res$DatesM,
+  group = res$Group,
+  gdp_idx = res$quarterly_start_idx,
+  startEV = P$startEV,
+  endEV = P$endEV,
+  model_type = "dmfm",
+  max_iter = 1000,
+  eps = 1e-3
 )
 
-# Plot: Nowcast vs Verità
-plot(vintages, true_series, type = "l", col = "black", lwd = 2,
-     ylab = "Valore (standardizzato)", xlab = "Vintage (t)", 
-     main = "Nowcast vs. Valore Osservato", ylim = range(c(true_series, nowcast_series), na.rm = TRUE))
-lines(vintages, nowcast_series, col = "blue", lwd = 2, lty = 2)
-legend("topleft", legend = c("Vero", "Nowcast"), col = c("black", "blue"), lty = c(1, 2), lwd = 2)
+save(res,tensor,inputs, std, roll_nowcast, k_hat, W, file = "dmfm_rollnowcastLS_11_201_40var.RData")
 
+load("dmfm_rollnowcastLS_11_201_40var.RData")
+# ==============================================================================
+# RMSFE FOR ANY MONTH NOWCAST 
+# ==============================================================================
+DatesM <- res$DatesM[1:300]
+Y_std <- std$Y_scaled
+
+
+compute_rmsfe <- function(nowcast_list, Y_true, gdp_idx, DatesM) {
+  # nowcast_list: lista con nomi-date (es. "2024-01-01"), ciascun elemento è un vettore di p1 paesi
+  # Y_true: array [T, p1, p2] destandardizzato
+  # gdp_idx: indice colonna GDP
+  # DatesM: vettore delle date mensili corrispondenti a Y_true (es. res$DatesM)
+  
+  dates_vec <- as.Date(names(nowcast_list))  # vettore di date
+  n <- length(dates_vec)
+  p1 <- dim(Y_true)[2]
+  rmsfe_mat <- matrix(NA, nrow = p1, ncol = n)
+  
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
+    
+    # Calcola il mese all’interno del trimestre
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1 # Fine trimestre ( wirdoooo)
+    
+    if (t_gdp_true > dim(Y_true)[1]) next  # fuori dai dati
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        rmsfe_mat[j, i] <- (forecast - actual)^2
+      }
+    }
+  }
+  
+  # Media per paese
+  rmsfe_vec <- sqrt(rowMeans(rmsfe_mat, na.rm = TRUE))
+  names(rmsfe_vec) <- paste0("Country_", 1:p1)
+  return(rmsfe_vec)
+}
+
+# Destandardizza i dati veri
+Y_true <- inverse_standardize_Y(Y_std, std$mean, std$sd)
+
+# Calcola RMSFE per ogni mese del trimestre
+rmsfe_M1 <- compute_rmsfe(roll_nowcast$M1, Y_true, gdp_idx = res$quarterly_start_idx, DatesM)
+rmsfe_M2 <- compute_rmsfe(roll_nowcast$M2, Y_true, gdp_idx = res$quarterly_start_idx, DatesM)
+rmsfe_M3 <- compute_rmsfe(roll_nowcast$M3, Y_true, gdp_idx = res$quarterly_start_idx, DatesM)
+
+
+# Crea dataframe
+rmsfe_df <- data.frame(
+  Country = names(rmsfe_M1),
+  M1 = rmsfe_M1,
+  M2 = rmsfe_M2,
+  M3 = rmsfe_M3
+)
+
+# Plot con ggplot2
+library(tidyr)
 library(ggplot2)
 
-ggplot(df, aes(x = Date)) +
-  geom_line(aes(y = Nowcast), color = "blue", linewidth = 1) +
-  geom_point(aes(y = RealGDP), color = "red", size = 2) +
-  labs(title = "Confronto tra Nowcast e PIL Reale",
-       x = "Data",
-       y = "Valore") +
-  theme_minimal()
+rmsfe_long <- pivot_longer(rmsfe_df, cols = c(M1, M2, M3), names_to = "Month", values_to = "RMSFE")
+
+ggplot(rmsfe_long, aes(x = Country, y = RMSFE, fill = Month)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "RMSFE of GDP Nowcast - Month of Quarter",
+    x = "Country", y = "RMSFE"
+  ) +
+  scale_fill_manual(values = c("M1" = "steelblue", "M2" = "orange", "M3" = "darkred")) +
+  theme_minimal(base_size = 14)
+
+
+
+# =============================================================================
+# Boxplot RMSFME
+# =============================================================================
+
+compute_rmsfe_long <- function(nowcast_list, Y_true, gdp_idx, DatesM, month_label = "M1") {
+  dates_vec <- as.Date(names(nowcast_list))
+  p1 <- dim(Y_true)[2]
+  result_df <- data.frame()
+  
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
+    
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1
+    if (t_gdp_true > dim(Y_true)[1]) next
+    
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        err <- forecast - actual
+        result_df <- rbind(result_df, data.frame(
+          Country = paste0("Country_", j),
+          Date = date_t,
+          Month = month_label,
+          Error = err,
+          RMSFE = sqrt(err^2)
+        ))
+      }
+    }
+  }
+  return(result_df)
+}
+
+# Calcola errori per ogni mese del trimestre
+rmsfe_long_M1 <- compute_rmsfe_long(roll_nowcast$M1, Y_true, gdp_idx = res$quarterly_start_idx, DatesM, "M1")
+rmsfe_long_M2 <- compute_rmsfe_long(roll_nowcast$M2, Y_true, gdp_idx = res$quarterly_start_idx, DatesM, "M2")
+rmsfe_long_M3 <- compute_rmsfe_long(roll_nowcast$M3, Y_true, gdp_idx = res$quarterly_start_idx, DatesM, "M3")
+
+# Combina in un unico dataframe
+rmsfe_all_long <- bind_rows(rmsfe_long_M1, rmsfe_long_M2, rmsfe_long_M3)
+
+# Boxplot
+ggplot(rmsfe_all_long, aes(x = Month, y = RMSFE, fill = Month)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  geom_jitter(width = 0.2, color = "gray40", alpha = 0.5) +
+  facet_wrap(~ Country, scales = "free_y") +
+  labs(
+    title = "Distribuzione RMSFE per Paese nei Mesi del Trimestre",
+    x = "Mese del Trimestre", y = "RMSFE"
+  ) +
+  scale_fill_manual(values = c("M1" = "steelblue", "M2" = "orange", "M3" = "darkred")) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+
+
+# =============================================================================
+# Plot aggiornamenti del nowcast 
+# =============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+plot_nowcast_vs_true_gdp <- function(roll_nowcast, Y_true, gdp_idx, DatesM) {
+  p1 <- dim(Y_true)[2]  # numero paesi
+  
+  # Nomi coerenti: "Country_1", ..., "Country_p1"
+  country_names <- paste0("Country_", 1:p1)
+  
+  # Funzione ausiliaria per costruire il data.frame da ciascuna lista di nowcast
+  build_df <- function(nc_list, label) {
+    df <- data.frame(
+      Date = as.Date(names(nc_list)),
+      do.call(rbind, nc_list)
+    )
+    colnames(df)[-1] <- country_names
+    df$Month <- label
+    return(df)
+  }
+  
+  # Costruzione tabelle per ciascun mese
+  df_M1 <- build_df(roll_nowcast$M1, "M1")
+  df_M2 <- build_df(roll_nowcast$M2, "M2")
+  df_M3 <- build_df(roll_nowcast$M3, "M3")
+  
+  # Unione di tutti i nowcast
+  df_all <- bind_rows(df_M1, df_M2, df_M3) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "Nowcast") %>%
+    mutate(Country = factor(Country, levels = country_names))
+  
+  # Serie reale del GDP (solo nei mesi in cui esce: ogni 3 mesi)
+  df_true <- data.frame(
+    Date = DatesM,
+    Y_true_gdp = Y_true[ , , gdp_idx]
+  )
+  colnames(df_true)[-1] <- country_names
+  df_true <- df_true %>%
+    slice(seq(3, n(), by = 3)) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "True")
+  
+  # Merge tra nowcast e serie reale
+  plot_df <- left_join(df_all, df_true, by = c("Date", "Country"))
+  
+  # Plot
+  ggplot(plot_df, aes(x = Date)) +
+    geom_line(aes(y = Nowcast, color = Month), linewidth = 1) +
+    geom_point(aes(y = True), color = "black", size = 2, shape = 16, na.rm = TRUE) +
+    facet_wrap(~ Country, scales = "free_y") +
+    labs(
+      title = "Nowcast del GDP vs Valori Reali per Paese",
+      x = "Data", y = "GDP",
+      color = "Mese del Trimestre"
+    ) +
+    scale_color_manual(values = c("M1" = "steelblue", "M2" = "orange", "M3" = "darkgreen")) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "bottom")
+}
+
+
+plot_nowcast_vs_true_gdp(roll_nowcast, Y_true, gdp_idx = res$quarterly_start_idx, DatesM)
+
+
+
+# =============================================================================
+# Plot aggiornamenti del nowcast per ogni mese
+# =============================================================================
+plot_monthly_nowcast_series <- function(nowcast_list, Y_true, gdp_idx, DatesM, month_label = "M1") {
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(lubridate)
+  
+  p1 <- dim(Y_true)[2]  # numero di paesi
+  country_names <- paste0("Country_", 1:p1)
+  
+  # Costruisci tabella dei nowcast
+  df_nowcast <- data.frame(
+    Date = as.Date(names(nowcast_list)),
+    do.call(rbind, nowcast_list)
+  )
+  colnames(df_nowcast)[-1] <- country_names
+  
+  df_nowcast <- df_nowcast %>%
+    pivot_longer(-Date, names_to = "Country", values_to = "Nowcast") %>%
+    mutate(Country = factor(Country, levels = country_names)) %>%
+    mutate(
+      MonthNum = as.integer(format(Date, "%m")),
+      Shift = 3 - ((MonthNum - 1) %% 3),
+      Date_adjusted = Date + months(Shift)
+    )
+  
+  # Serie reale del GDP (ogni 3 mesi)
+  df_true <- data.frame(
+    Date = DatesM,
+    Y_true_gdp = Y_true[, , gdp_idx]
+  )
+  colnames(df_true)[-1] <- country_names
+  df_true <- df_true %>%
+    slice(seq(3, n(), by = 3)) %>%
+    pivot_longer(-Date, names_to = "Country", values_to = "True")
+  
+  # Merge tra Date_adjusted e Date vera
+  df_plot <- df_nowcast %>%
+    left_join(df_true, by = c("Date_adjusted" = "Date", "Country"))
+  
+  # Plot
+  ggplot(df_plot, aes(x = Date)) +
+    geom_line(aes(y = Nowcast), color = "blue", linewidth = 1) +
+    geom_point(aes(y = True), color = "red", size = 2, shape = 16, na.rm = TRUE) +
+    facet_wrap(~ Country, scales = "free_y") +
+    labs(
+      title = paste("Nowcast Serie Storica da", month_label, "vs True GDP"),
+      x = "Data (mese previsione)", y = "GDP"
+    ) +
+    theme_minimal(base_size = 13)
+}
+
+plot_monthly_nowcast_series(roll_nowcast$M1, Y_true, res$quarterly_start_idx, DatesM, month_label = "M1")
+plot_monthly_nowcast_series(roll_nowcast$M2, Y_true, res$quarterly_start_idx, DatesM, month_label = "M2")
+plot_monthly_nowcast_series(roll_nowcast$M3, Y_true, res$quarterly_start_idx, DatesM, month_label = "M3")
 

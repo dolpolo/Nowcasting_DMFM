@@ -5,8 +5,13 @@
 # ==============================================================================
 # GDP COMMUNALITIES IN EA 
 # ==============================================================================
-
 GDP_communality <- function(country_codes) {
+  
+  # Definisci manualmente i periodi di recessione
+  recession_df <- data.frame(
+    start = as.Date(c("2008-01-01", "2011-07-01", "2020-01-01")),
+    end   = as.Date(c("2009-06-30", "2013-03-31", "2020-06-30"))
+  )
   
   all_gdp <- list()
   
@@ -16,11 +21,10 @@ GDP_communality <- function(country_codes) {
     
     df <- read_excel(data_path)
     
-    # Special case for EA: compute PACF, ACF, correlation heatmap
+    # Analisi specifica per EA
     if (cc == "EA") {
       EAdataQ <- df
       
-      # ---- Autocorrelation analysis for GDP variables ----
       target_variables <- dplyr::select(EAdataQ, dplyr::starts_with("GDP_"))
       
       for (var in names(target_variables)) {
@@ -32,7 +36,6 @@ GDP_communality <- function(country_codes) {
         }
       }
       
-      # ---- Correlation heatmap between variables (no labels inside cells) ----
       EA_corr_data <- dplyr::select(EAdataQ, -Time)
       correlation_matrix <- cor(EA_corr_data, use = "pairwise.complete.obs")
       melted_corr <- melt(correlation_matrix)
@@ -40,7 +43,7 @@ GDP_communality <- function(country_codes) {
       p_heat <- ggplot(data = melted_corr, aes(x = Var1, y = Var2, fill = value)) +
         geom_tile(color = "white") +
         scale_fill_gradient2(low = "blue", mid = "white", high = "red",
-                             midpoint = 0, limits = c(-1, 1))+
+                             midpoint = 0, limits = c(-1, 1)) +
         theme_minimal() +
         labs(title = "EA Variables Correlation Heatmap", x = NULL, y = NULL) +
         theme(axis.text.x = element_text(angle = 45, hjust = 1),
@@ -48,14 +51,13 @@ GDP_communality <- function(country_codes) {
       print(p_heat)
     }
     
-    # ---- Extract GDP series and add to list ----
+    # Estrazione GDP
     gdp_idx <- which(tolower(colnames(df)) == tolower(gdp_label))
-    
-    gdp_series <- df[[gdp_idx]]*100
+    gdp_series <- df[[gdp_idx]] * 100
     date_series <- df[[1]]
     
     gdp_df <- data.frame(
-      date = date_series,
+      date = as.Date(date_series),
       gdp = gdp_series,
       country = cc
     )
@@ -63,18 +65,30 @@ GDP_communality <- function(country_codes) {
     all_gdp[[cc]] <- gdp_df
   }
   
-  # ---- Combine all GDP series ----
+  # Combinazione
   full_gdp <- bind_rows(all_gdp)
   
-  # === Line Plot ===
+  # === Line Plot con recessioni ===
   p1 <- ggplot(full_gdp, aes(x = date, y = gdp, color = country)) +
-    geom_line(linewidth = 1) +
+    geom_rect(
+      data = recession_df,
+      aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+      inherit.aes = FALSE,
+      fill = "grey30", alpha = 0.1
+    ) +
+    geom_line(linewidth = 0.5) +
     labs(title = "GDP per Country Over Time", x = "Date", y = "GDP") +
     theme_minimal() +
     theme(legend.position = "bottom")
   
   # === Facet Plot ===
   p2 <- ggplot(full_gdp, aes(x = date, y = gdp)) +
+    geom_rect(
+      data = recession_df,
+      aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+      inherit.aes = FALSE,
+      fill = "grey30", alpha = 0.1
+    ) +
     geom_line(color = "steelblue") +
     facet_wrap(~ country, scales = "free_y") +
     labs(title = "GDP Faceted by Country", x = "Date", y = "GDP") +
@@ -83,7 +97,7 @@ GDP_communality <- function(country_codes) {
   print(p1)
   print(p2)
   
-  # === Comovement Analysis ===
+  # === Comovement ===
   wide_gdp <- full_gdp %>%
     filter(!is.na(gdp)) %>%
     pivot_wider(names_from = country, values_from = gdp)
@@ -100,9 +114,9 @@ GDP_communality <- function(country_codes) {
     geom_text(aes(label = round(Correlation, 2)), size = 3, color = "black") +
     scale_fill_gradient2(
       low = "blue", mid = "white", high = "red",
-      midpoint = 0.5, limits = c(0, 1), name = "Correlation"
+      midpoint = 0, limits = c(-1, 1), name = "Correlation"
     ) +
-    labs(title = "GDP Comovement Between Countries", x = NULL, y = NULL) +
+    labs(title = "GDP Comovement Between EA Countries", x = NULL, y = NULL) +
     theme_minimal() +
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1),
@@ -110,7 +124,6 @@ GDP_communality <- function(country_codes) {
     )
   
   print(p3)
-  
   
   assign("gdp_results", list(
     data = all_gdp,
@@ -120,7 +133,7 @@ GDP_communality <- function(country_codes) {
 }
 
 # ==============================================================================
-# GDP BY COUNTRU CONTRIBUTION
+# GDP BY COUNTRY CONTRIBUTION
 # ==============================================================================
 
 
@@ -248,8 +261,7 @@ standardize_Y <- function(Y) {
   p1 <- dim(Y)[2]
   p2 <- dim(Y)[3]
   
-  Y_std <- array(NA, dim = dim(Y))
-  dimnames(Y_std) <- dimnames(Y) 
+  Y_std <- array(NA, dim = dim(Y), dimnames = dimnames(Y))
   mean_Y <- matrix(0, p1, p2)
   sd_Y <- matrix(1, p1, p2)
   
@@ -273,8 +285,7 @@ inverse_standardize_Y <- function(Y_scaled, mean_Y, sd_Y) {
   p1 <- dim(Y_scaled)[2]
   p2 <- dim(Y_scaled)[3]
   
-  Y_original <- array(NA, dim = dim(Y_scaled))
-  dimnames(Y_original) <- dimnames(Y_centered)
+  Y_original <- array(NA, dim = dim(Y_scaled), dimnames = dimnames(Y_scaled))
   
   for (t in 1:T) {
     Y_original[t,,] <- Y_scaled[t,,] * sd_Y + mean_Y
@@ -319,6 +330,12 @@ decenter_Y <- function(Y_centered, mean_Y) {
   return(Y_original)
 }
 
+inverse_standardize_nowcasts <- function(nowcast_list, mean_Y, sd_Y) {
+  lapply(nowcast_list, function(mat) {
+    mat * sd_Y + mean_Y
+  })
+}
+
 
 # ==============================================================================
 # NOT AVAILABLE PERCENTAGE
@@ -335,34 +352,128 @@ nan_percent_Y <- function(Y) {
 # ==============================================================================
 # GENERAL PREPARATION OF DATA 
 # ==============================================================================
-prepare_country_data <- function(country_code, P) {
+
+select_base_variable_names <- function(countries, P) {
   modelM <- P$modelM
   modelQ <- P$modelQ
   
-  # ---- SET DYNAMIC PATHS ----
+  model_sizes <- list(
+    small = list(Q = 1, M = 5),  # small: solo GDP tra le trimestrali
+    medium = list(Q = 5, M = 10),
+    large = list(Q = 10, M = 50)
+  )
+  
+  n_m <- model_sizes[[tolower(modelM)]]$M
+  n_q <- model_sizes[[tolower(modelQ)]]$Q
+  
+  selected_m_names <- c()
+  selected_q_names <- c()
+  
+  for (cc in countries) {
+    DataFile <- paste0("Data/", cc, "/Processed/Data_", cc, ".xlsx")
+    monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong")
+    quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong")
+    
+    DataM <- monthly_data[, -1]
+    DataQ <- quarterly_data[, -1]
+    
+    gdp_q_idx <- which(grepl("^GDP_", colnames(DataQ), ignore.case = TRUE))[1]
+    gdp_q <- DataQ[[gdp_q_idx]]
+    gdp_rep <- rep(gdp_q, each = 3)[1:nrow(DataM)]
+    
+    # Correlazioni mensili
+    cors_m <- apply(DataM, 2, function(x) suppressWarnings(cor(x, gdp_rep, use = "pairwise.complete.obs")))
+    top_m <- names(cors_m)[order(abs(cors_m), decreasing = TRUE)[1:min(n_m, length(cors_m))]]
+    
+    # Correlazioni trimestrali (solo se medium/large)
+    top_q <- NULL
+    if (n_q > 1) {
+      cors_q <- apply(DataQ[, -gdp_q_idx], 2, function(x) suppressWarnings(cor(x, gdp_q, use = "pairwise.complete.obs")))
+      top_q <- names(DataQ)[-gdp_q_idx][order(abs(cors_q), decreasing = TRUE)[1:min(n_q, length(cors_q))]]
+    }
+    
+    # Rimozione suffisso paese
+    base_m <- gsub(paste0("_", cc, "$"), "", top_m)
+    base_q <- if (!is.null(top_q)) gsub(paste0("_", cc, "$"), "", top_q) else character()
+    
+    selected_m_names <- union(selected_m_names, base_m)
+    selected_q_names <- union(selected_q_names, base_q)
+  }
+  
+  # Per modello small: trimestrali = solo GDP
+  if (n_q == 1) {
+    selected_q_names <- "GDP"
+  }
+  
+  return(list(monthly = selected_m_names, quarterly = selected_q_names))
+}
+
+filter_common_variables_across_countries <- function(countries, selected_base_m, selected_base_q) {
+  valid_m_vars <- list()
+  valid_q_vars <- list()
+  
+  for (cc in countries) {
+    DataFile <- paste0("Data/", cc, "/Processed/Data_", cc, ".xlsx")
+    monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong")
+    quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong")
+    
+    DataM <- monthly_data[, -1]
+    DataQ <- quarterly_data[, -1]
+    
+    col_m <- colnames(DataM)
+    col_q <- colnames(DataQ)
+    
+    # Rimuove suffisso country e costruisce mappa
+    base_m <- gsub(paste0("_", cc, "$"), "", col_m)
+    base_q <- gsub(paste0("_", cc, "$"), "", col_q)
+    
+    matched_m <- selected_base_m[selected_base_m %in% base_m]
+    matched_q <- selected_base_q[selected_base_q %in% base_q]
+    
+    # Mapping: base → full
+    matched_full_m <- setNames(paste0(matched_m, "_", cc), matched_m)
+    matched_full_q <- setNames(paste0(matched_q, "_", cc), matched_q)
+    
+    valid_m_vars[[cc]] <- matched_full_m
+    valid_q_vars[[cc]] <- matched_full_q
+  }
+  
+  # Trova solo i base_name presenti in tutti i paesi
+  common_base_m <- Reduce(intersect, lapply(valid_m_vars, names))
+  common_base_q <- Reduce(intersect, lapply(valid_q_vars, names))
+  
+  # Per ogni paese, ritorna solo le variabili comuni
+  filtered_vars_m <- lapply(valid_m_vars, function(x) x[common_base_m])
+  filtered_vars_q <- lapply(valid_q_vars, function(x) x[common_base_q])
+  
+  return(list(monthly = filtered_vars_m, quarterly = filtered_vars_q))
+}
+
+prepare_country_data <- function(country_code, P, selected_vars_m, selected_vars_q) {
+  # ---- PATHS ----
   DataFile <- paste0("Data/", country_code, "/Processed/Data_", country_code, ".xlsx")
   LegendFile <- paste0("Data/", country_code, "/Original/Legend_", country_code, ".xlsx")
   
-  # ---- LOAD MONTHLY DATA ----
+  # ---- MONTHLY DATA ----
   monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong", col_names = TRUE)
-  DataM <- monthly_data[, -1]
   DatesM <- as.Date(monthly_data[[1]])
+  DataM <- monthly_data[, -1]
+  vars_m_country <- selected_vars_m[[country_code]]
+  DataM <- DataM[, vars_m_country]
   
+  # Monthly Legend: recupera la classe delle variabili selezionate
   legend_m <- readxl::read_excel(LegendFile, sheet = "MDescriptionFull")
-  model_col_m <- which(colnames(legend_m) == modelM)
-  ListM <- which((legend_m[, model_col_m]) == 1)
+  idx_m <- match(vars_m_country, legend_m[[1]])  # prima colonna = nomi variabili
+  ClassM <- legend_m$Class[idx_m]
+  TransfM <- floor(legend_m[idx_m, 8])
+  GroupM <- legend_m$M1[idx_m]
   
-  DataM <- DataM[, ListM]
-  GroupM <- legend_m[ListM, 16]
-  SeriesM <- legend_m[ListM, 1]
-  TransfM <- floor(legend_m[ListM, 8])
-  UnbM <- legend_m[ListM, 12:14]
-  ClassM <- legend_m[ListM, 11]
-  
+  # Annualization for monthly
   DataMTrf <- DataM
   annualize_idx <- which(TransfM[[1]] %in% c(2, 4))
   DataMTrf[, annualize_idx] <- DataMTrf[, annualize_idx] * 100
-  
+
+  # ---- COVID MASK SOLO SU VARIABILI REALI ----
   CovidNaN <- function(data, dates, class, start_covid, end_covid) {
     real_idx <- which(grepl("r", tolower(class)))
     mask <- dates >= as.Date(as.yearmon(start_covid)) & dates <= as.Date(as.yearmon(end_covid))
@@ -371,36 +482,35 @@ prepare_country_data <- function(country_code, P) {
     data[covid_matrix] <- NA
     list(data, covid_matrix)
   }
-  
-  resM <- CovidNaN(DataMTrf, DatesM, ClassM[[1]], P$covid_start, P$covid_end)
+  resM <- CovidNaN(DataMTrf, DatesM, ClassM, P$covid_start, P$covid_end)
   DataMTrf <- resM[[1]]
   Covid_obsM <- resM[[2]]
   T_M <- nrow(DataMTrf)
   
-  # ---- LOAD QUARTERLY DATA ----
+  # ---- QUARTERLY DATA ----
   quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong", col_names = TRUE)
-  DataQ <- quarterly_data[, -1]
   DatesQ <- as.Date(quarterly_data[[1]])
+  DataQ <- quarterly_data[, -1]
+  vars_q_country <- selected_vars_q[[country_code]]
+  DataQ <- DataQ[, vars_q_country]
   
+  # Quarterly Legend
   legend_q <- readxl::read_excel(LegendFile, sheet = "QDescriptionFull")
-  model_col_q <- which(colnames(legend_q) == modelQ)
-  ListQ <- which((legend_q[, model_col_q]) == 1)
+  idx_q <- match(vars_q_country, legend_q[[1]])  # prima colonna = nomi variabili
+  ClassQ <- legend_q$Class[idx_q]
+  TransfQ <- floor(legend_q[idx_q, 8])
+  GroupQ <- legend_q$M1[idx_q]
   
-  DataQ <- DataQ[, ListQ]
-  GroupQ <- legend_q[ListQ, 16]
-  SeriesQ <- legend_q[ListQ, 1]
-  TransfQ <- floor(legend_q[ListQ, 8])
-  UnbQ <- legend_q[ListQ, 12:14]
-  ClassQ <- legend_q[ListQ, 11]
   
   DataQTrf <- DataQ
-  annualize_q <- which(TransfQ[[1]] %in% c(2, 4))
-  DataQTrf[, annualize_q] <- DataQTrf[, annualize_q] * 100
+  annualize_idx <- which(TransfQ[[1]] %in% c(2, 4))
+  DataQTrf[, annualize_idx] <- DataQTrf[, annualize_idx] * 100
   
-  resQ <- CovidNaN(DataQTrf, DatesQ, ClassQ[[1]], P$covid_start, P$covid_end)
+  resQ <- CovidNaN(DataQTrf, DatesQ, ClassQ, P$covid_start, P$covid_end)
   DataQTrf <- resQ[[1]]
   Covid_obsQ <- resQ[[2]]
   
+  # ---- ESPANSIONE TRIMESTRALE A MENSILE ----
   DataQMTrf <- do.call(rbind, lapply(1:nrow(DataQTrf), function(i) {
     rbind(rep(NA, ncol(DataQTrf)),
           rep(NA, ncol(DataQTrf)),
@@ -408,6 +518,7 @@ prepare_country_data <- function(country_code, P) {
   }))
   T_Q <- nrow(DataQMTrf)
   
+  # ---- UNIFICA LUNGHEZZA ----
   T_final <- max(T_M, T_Q)
   if (T_M < T_final) {
     paddingM <- data.frame(matrix(NA, T_final - T_M, ncol(DataMTrf)))
@@ -420,25 +531,25 @@ prepare_country_data <- function(country_code, P) {
     DataQMTrf <- rbind(DataQMTrf, paddingQ)
   }
   
+  # ---- OUTPUT ----
   Data <- cbind(DataMTrf, DataQMTrf)
-  Series <- c(SeriesM, SeriesQ)
+  Series <- c(vars_m_country, vars_q_country)
   Group <- c(GroupM, GroupQ)
-  UnbPatt <- rbind(UnbM, UnbQ)
   
   result <- list(
     Data = Data,
     DatesM = DatesM,
     DatesQ = DatesQ,
     Series = Series,
-    Group = Group,
-    UnbalancedPattern = UnbPatt,
+    UnbalancedPattern = NULL,
     Covid_obsM = Covid_obsM,
     Covid_obsQ = Covid_obsQ,
-    Name = paste0("Data_", country_code)
+    Group = Group,
+    Name = paste0("Data_", country_code),
+    quarterly_start_idx = ncol(DataMTrf) + 1
   )
   
   assign(result$Name, result$Data, envir = .GlobalEnv)
-  result$quarterly_start_idx <- ncol(DataMTrf) + 1
   return(result)
 }
 
@@ -484,7 +595,7 @@ tensor_data <- function(countries, P) {
   # Crea tensor Y
   Y <- array(NA, dim = c(T_max, length(countries), length(all_vars)),
              dimnames = list(
-               as.character(1:T_max),
+               format(res$DatesM[1:T_max], "%Y-%m"),
                countries,
                all_vars
              ))
