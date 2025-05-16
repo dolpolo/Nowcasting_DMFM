@@ -1,143 +1,97 @@
 # ==============================================================================
-# FACTORS VISUALIZATION
-# ==============================================================================
-
-plot_factors_tensor <- function(Factors, title = "Dynamic Factors", free_y = TRUE) {
-  T <- dim(Factors)[1]
-  k1 <- dim(Factors)[2]
-  k2 <- dim(Factors)[3]
-  
-  df <- data.frame()
-  for (i in 1:k1) {
-    for (j in 1:k2) {
-      df_temp <- data.frame(
-        time = 1:T,
-        value = Factors[, i, j],
-        row_factor = paste0("F_row_", i),
-        col_factor = paste0("F_col_", j),
-        component = paste0("F(", i, ",", j, ")")
-      )
-      df <- rbind(df, df_temp)
-    }
-  }
-  
-  p <- ggplot(df, aes(x = time, y = value)) +
-    geom_line(color = "steelblue", linewidth = 0.8) +
-    facet_wrap(~ component, scales = if (free_y) "free_y" else "fixed") +
-    theme_minimal(base_size = 14) +
-    labs(
-      title = title,
-      x = "Tempo",
-      y = "Valore"
-    )
-  
-  return(p)
-}
-
-
-# ==============================================================================
 # NOWCAST
 # ==============================================================================
 
-
-rolling_nowcast_dmfm <- function(Y, W, k, t_vec, model_type = "dmfm", max_iter = 1000, eps = 1e-03, target_idx = NULL) {
-  # Y: array [T, p1, p2]
-  # W: array [T, p1, p2]
-  # k: vector c(k1, k2)
-  # t_vec: vector of vintages (e.g. 20:300)
-  # model_type: "dmfm", "fm", "fv"
-  # target_idx: optional list(row, col) to extract specific nowcast
+rolling_nowcast_dmfm_by_release <- function(Y_full, W_full, k, dates, group, gdp_idx, 
+                                            startEV, endEV,
+                                            model_type = "dmfm", max_iter = 1000, eps = 1e-3) {
+  T <- dim(Y_full)[1]
+  p1 <- dim(Y_full)[2]
+  p2 <- dim(Y_full)[3]
   
-  T <- dim(Y)[1]
-  p1 <- dim(Y)[2]
-  p2 <- dim(Y)[3]
+  # Calcola gli indici temporali corrispondenti alle date
+  t_start <- which(dates == startEV)
+  t_end <- which(dates == endEV)
+  if (length(t_start) == 0 || length(t_end) == 0) {
+    stop("startEV o endEV non trovate nel vettore dates.")
+  }
   
-  nowcast_list <- list()
-  factors_list <- list()
+  # Output lists per i tre mesi del trimestre
+  nowcast_M1 <- list()
+  nowcast_M2 <- list()
+  nowcast_M3 <- list()
   
-  for (t in t_vec) {
-    cat(sprintf("Rolling nowcast at vintage t = %d\n", t))
+  for (t in seq(t_start, t_end)) {
     
-    Y_t <- Y[1:t,, , drop = FALSE]
-    W_t <- W[1:t,, , drop = FALSE]
+    # t = 288
+    # t = 289
+    # t = 290
+    # t = 291 
+    # t = 292
     
-    # Initial values using imputation
-    imp <- mfm.cl(Y_t, W_t, k)
+    cat(sprintf(">>> Rolling nowcast at t = %d (%s)\n", t, as.character(dates[t])))
     
-    # Initial parameters for MFM and MAR
-    inputs <- dmfm.na.2.sv(imp$Y_imputed, k, W, t = "dmfm")
+    # Subset e maschere release
+    Y_t <- Y_full[1:t, , , drop = FALSE]
+    W_t <- W_full[1:t, , , drop = FALSE]
     
-    # EM estimation
-    fit <- dmfm.na.em(inputs, Y_t, k, W_t, t = model_type, max.iter = max_iter, eps = eps)
+    # Standardizza il dataset fino a t
+    std <- standardize_Y(Y_t)
+    Y_t_std <- std$Y_scaled
+    
+    # pre_prova1 <- Y_t_std[,1,]
+    # pre_prova2 <- Y_t_std[,1,]
+    # pre_prova3 <- Y_t_std[,1,]
+    # pre_prova4 <- Y_t_std[,1,]
+    # pre_prova5 <- Y_t_std[,1,]
+    
+    # Applica regole di rilascio
+    for (j in 1:p2) {
+      freq_j <- group[j]
+      delay <- freq_j - 1
+      release_time <- t - delay
+      if (release_time >= 1) {
+        if (release_time + 1 <= t) {
+          Y_t_std[(release_time + 1):t, , j] <- NA
+          W_t[(release_time + 1):t, , j] <- 0
+        }
+      } else {
+        Y_t_std[, , j] <- NA
+        W_t[, , j] <- 0
+      }
+    }
+    
+    # prova1 <- Y_t_std[ ,1,]
+    # prova2 <- Y_t_std[ ,1,]
+    # prova3 <- Y_t_std[ ,1,]
+    # prova4 <- Y_t_std[ ,1,]
+    # prova5 <- Y_t_std[ ,1,]
+    
+    # EM Estimation
+    imp <- mfm.cl(Y_t_std, W_t, k)
+    inputs <- dmfm.na.2.sv(imp$Y_imputed, k, W_full, t = model_type)
+    fit <- dmfm.na.em(inputs, Y = Y_t_std, k = k, W = W_t, t = model_type, max.iter = max_iter, eps = eps)
     model <- fit$model
     
-    # Nowcast: filtered factors at time t
-    f_t <- model$ff[t,,]
-    
-    # Reconstruct Y_t_hat
+    # Ricostruisci il nowcast
+    f_t <- model$ff[t, , ]
     Y_hat <- model$R %*% f_t %*% t(model$C)
+    Y_hat_true <- Y_hat * std$sd + std$mean
+    gdp_forecast <- Y_hat_true[, gdp_idx]
     
-    # Store full matrix or only selected entry
-    if (!is.null(target_idx)) {
-      nowcast_value <- Y_hat[target_idx[[1]], target_idx[[2]]]
-    } else {
-      nowcast_value <- Y_hat
+    # Salva per il mese del trimestre corrispondente
+    m_trimestre <- ((as.integer(format(dates[t], "%m")) - 1) %% 3) + 1
+    date_str <- as.character(dates[t])
+    if (m_trimestre == 1) {
+      nowcast_M1[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 2) {
+      nowcast_M2[[date_str]] <- gdp_forecast
+    } else if (m_trimestre == 3) {
+      nowcast_M3[[date_str]] <- gdp_forecast
     }
-    
-    nowcast_list[[as.character(t)]] <- nowcast_value
-    factors_list[[as.character(t)]] <- f_t
   }
   
-  return(list(nowcasts = nowcast_list, factors = factors_list))
-}
-
-# ---- 
-rolling_nowcast_dfm <- function(Y, W, k, t_vec, model_type = "dfm", max_iter = 1000, eps = 1e-1, target_idx = NULL) {
-  # Y: array [T, 1, p2]
-  # W: array [T, 1, p2]
-  # k: vector c(1, k2)
-  # t_vec: vector of vintages
-  # model_type: "dfm"
-  # target_idx: optional column index for nowcast extraction
-  
-  T <- dim(Y)[1]
-  p2 <- dim(Y)[3]
-  
-  nowcast_list <- list()
-  factors_list <- list()
-  
-  for (t in t_vec) {
-    cat(sprintf("Rolling nowcast at vintage t = %d\n", t))
-    
-    Y_t <- Y[1:t,, , drop = FALSE]
-    W_t <- W[1:t,, , drop = FALSE]
-    
-    # Initial values
-    imp <- mfm.cl.vec(Y_t, W_t, k)
-    inputs <- dmfm.na.2.sv.vec(imp$Y_imputed, k, W_t, t = model_type)
-    
-    # EM estimation
-    fit <- dmfm.na.em.vec(inputs, Y_t, k, W_t, t = model_type, max.iter = max_iter, eps = eps)
-    model <- fit$model
-    
-    # Nowcast: filtered factor f_t
-    f_t <- model$ff[t,,]  # dimensione: [1 x k2]
-    
-    # Reconstruct Y_hat: Y_t = f_t %*% t(C)
-    Y_hat <- f_t %*% t(model$C)  # dimensione: [1 x p2]
-    
-    # Store result
-    if (!is.null(target_idx)) {
-      nowcast_value <- Y_hat[1, target_idx]
-    } else {
-      nowcast_value <- Y_hat
-    }
-    
-    nowcast_list[[as.character(t)]] <- nowcast_value
-    factors_list[[as.character(t)]] <- f_t
-  }
-  
-  return(list(nowcasts = nowcast_list, factors = factors_list))
+  return(list(M1 = nowcast_M1, M2 = nowcast_M2, M3 = nowcast_M3))
 }
 
 

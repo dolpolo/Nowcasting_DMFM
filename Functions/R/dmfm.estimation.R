@@ -3,7 +3,7 @@
 # ==============================================================================
 
 # ---------------------------- Dolp Method -------------------------------------
-# Modifiche apportate alla funzione dmfm.na.em:
+# Modifiche apportate alla funzione dmfm.na.em del Professor Trapin:
 
 # 1. Aggiunta funzione solve_safe() per gestire matrici singolari con rcond + ginv
 # 2. Sostituzione solve(R.1) e solve(C.1) con solve_safe(...) --> (ginv(...) se tol = 1e-6 )

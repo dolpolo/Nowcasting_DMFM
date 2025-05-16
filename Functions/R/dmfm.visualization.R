@@ -1,5 +1,5 @@
 ################################################################################
-############################ DESCRIPTIVE ANALYSIS ##############################
+########################## DESCRIPTIVE EA ANALYSIS #############################
 ################################################################################
 
 # ==============================================================================
@@ -127,6 +127,12 @@ GDP_communality <- function(country_codes) {
           plot.title = element_text(hjust = 0.5))
   
   ggsave("Figures/GDP_Correlation_Heatmap.png", p3, width = 8, height = 6, bg = "white")
+  
+  print(p_heat)
+  print(p1)
+  print(p2)
+  print(p3)
+  
   
   # Export for inspection
   assign("gdp_results", list(
@@ -286,373 +292,339 @@ plot_euro_area_gdp <- function(file_path = "Data/GDP_millionsEA.xlsx",
 
 
 ################################################################################
-############################## DATSET PREPARATION ##############################
+########################## DESCRIPTIVE DMFM ANALYSIS ###########################
 ################################################################################
 
 # ==============================================================================
-# STANDARDIZATION AND DESTANDARDIZATION
+# FACTORS VISUALIZATION
 # ==============================================================================
 
-standardize_Y <- function(Y) {
-  T <- dim(Y)[1]
-  p1 <- dim(Y)[2]
-  p2 <- dim(Y)[3]
+plot_factors_tensor <- function(Factors, title = "Dynamic Factors", free_y = TRUE) {
+  T <- dim(Factors)[1]
+  k1 <- dim(Factors)[2]
+  k2 <- dim(Factors)[3]
   
-  Y_std <- array(NA, dim = dim(Y), dimnames = dimnames(Y))
-  mean_Y <- matrix(0, p1, p2)
-  sd_Y <- matrix(1, p1, p2)
-  
-  for (i in 1:p1) {
-    for (j in 1:p2) {
-      y_ij <- Y[, i, j]
-      mu <- mean(y_ij, na.rm = TRUE)
-      sigma <- sd(y_ij, na.rm = TRUE)
-      if (is.na(sigma) || sigma == 0) sigma <- 1
-      Y_std[, i, j] <- (y_ij - mu) / sigma
-      mean_Y[i, j] <- mu
-      sd_Y[i, j] <- sigma
+  df <- data.frame()
+  for (i in 1:k1) {
+    for (j in 1:k2) {
+      df_temp <- data.frame(
+        time = 1:T,
+        value = Factors[, i, j],
+        row_factor = paste0("F_row_", i),
+        col_factor = paste0("F_col_", j),
+        component = paste0("F(", i, ",", j, ")")
+      )
+      df <- rbind(df, df_temp)
     }
   }
   
-  return(list(Y_scaled = Y_std, mean = mean_Y, sd = sd_Y))
+  p <- ggplot(df, aes(x = time, y = value)) +
+    geom_line(color = "steelblue", linewidth = 0.8) +
+    facet_wrap(~ component, scales = if (free_y) "free_y" else "fixed") +
+    theme_minimal(base_size = 14) +
+    labs(
+      title = title,
+      x = "Tempo",
+      y = "Valore"
+    )
+  
+  return(p)
 }
 
-inverse_standardize_Y <- function(Y_scaled, mean_Y, sd_Y) {
-  T <- dim(Y_scaled)[1]
-  p1 <- dim(Y_scaled)[2]
-  p2 <- dim(Y_scaled)[3]
+
+# ==============================================================================
+# LIKELIHOOD CONVERGENCE
+# ==============================================================================
+
+plot_em_llk <- function(history_df) {
+  # Plots log-likelihood evolution across EM iterations ( Use .
+  # Input:
+  #   - history_df: data frame with columns `iter` and `llk_new`
+  # Output:
+  #   - A ggplot object
   
-  Y_original <- array(NA, dim = dim(Y_scaled), dimnames = dimnames(Y_scaled))
+  library(ggplot2)
   
-  for (t in 1:T) {
-    Y_original[t,,] <- Y_scaled[t,,] * sd_Y + mean_Y
-  }
-  
-  return(Y_original)
+  ggplot(history_df, aes(x = iter, y = llk_new)) +
+    geom_line(color = "#0072B2") +
+    geom_point(color = "#D55E00") +
+    labs(
+      title = "Log-likelihood per EM iteration",
+      x = "Iteration",
+      y = "Log-Likelihood"
+    ) +
+    theme_minimal()
 }
 
-center_Y <- function(Y) {
-  T <- dim(Y)[1]
-  p1 <- dim(Y)[2]
-  p2 <- dim(Y)[3]
+
+# ==============================================================================
+# EVALUATION OF PERFORMANCES
+# ==============================================================================
+
+# nowcast_list <- roll_nowcast$M1
+# gdp_idx = res$quarterly_start_idx
+
+compute_rmsfe <- function(nowcast_list, Y_true, gdp_idx, DatesM) {
+  # nowcast_list: lista con nomi-date (es. "2024-01-01"), ciascun elemento è un vettore di p1 paesi
+  # Y_true: array [T, p1, p2] destandardizzato
+  # gdp_idx: indice colonna GDP
+  # DatesM: vettore delle date mensili corrispondenti a Y_true (es. res$DatesM)
   
-  Y_centered <- array(NA, dim = dim(Y))
-  dimnames(Y_centered) <- dimnames(Y) 
-  mean_Y <- matrix(0, p1, p2)
+  dates_vec <- as.Date(names(nowcast_list))  # vettore di date
+  n <- length(dates_vec)
+  p1 <- dim(Y_true)[2]
+  rmsfe_mat <- matrix(NA, nrow = p1, ncol = n)
   
-  for (i in 1:p1) {
-    for (j in 1:p2) {
-      y_ij <- Y[, i, j]
-      mu <- mean(y_ij, na.rm = TRUE)
-      Y_centered[, i, j] <- y_ij - mu
-      mean_Y[i, j] <- mu
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
+    
+    # Calcola il mese all’interno del trimestre
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1 # Fine trimestre ( wirdoooo)
+    
+    if (t_gdp_true > dim(Y_true)[1]) next  # fuori dai dati
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        rmsfe_mat[j, i] <- (forecast - actual)^2
+      }
     }
   }
   
-  return(list(Y_centered = Y_centered, mean = mean_Y))
+  # Media per paese
+  rmsfe_vec <- sqrt(rowMeans(rmsfe_mat, na.rm = TRUE))
+  names(rmsfe_vec) <- paste0("Country_", 1:p1)
+  return(rmsfe_vec)
 }
 
-decenter_Y <- function(Y_centered, mean_Y) {
-  T <- dim(Y_centered)[1]
-  p1 <- dim(Y_centered)[2]
-  p2 <- dim(Y_centered)[3]
+# =============================================================================
+# Boxplot RMSFME
+# =============================================================================
+
+compute_rmsfe_long <- function(nowcast_list, Y_true, gdp_idx, DatesM, month_label = "M1") {
+  dates_vec <- as.Date(names(nowcast_list))
+  p1 <- dim(Y_true)[2]
+  result_df <- data.frame()
   
-  Y_original <- array(NA, dim = dim(Y_centered))
-  dimnames(Y_original) <- dimnames(Y_centered)
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
+    
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1
+    if (t_gdp_true > dim(Y_true)[1]) next
+    
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        err <- forecast - actual
+        result_df <- rbind(result_df, data.frame(
+          Country = paste0("Country_", j),
+          Date = date_t,
+          Month = month_label,
+          Error = err,
+          RMSFE = sqrt(err^2)
+        ))
+      }
+    }
+  }
+  return(result_df)
+}
+
+
+
+# =============================================================================
+# Plot aggiornamenti del nowcast 
+# =============================================================================
+
+
+plot_nowcast_vs_true_gdp <- function(roll_nowcast, Y_true, gdp_idx, DatesM) {
+  p1 <- dim(Y_true)[2]  # numero paesi
   
-  for (t in 1:T) {
-    Y_original[t,,] <- Y_centered[t,,] + mean_Y
+  # Nomi coerenti: "Country_1", ..., "Country_p1"
+  country_names <- paste0("Country_", 1:p1)
+  
+  # Funzione ausiliaria per costruire il data.frame da ciascuna lista di nowcast
+  build_df <- function(nc_list, label) {
+    df <- data.frame(
+      Date = as.Date(names(nc_list)),
+      do.call(rbind, nc_list)
+    )
+    colnames(df)[-1] <- country_names
+    df$Month <- label
+    return(df)
   }
   
-  return(Y_original)
-}
-
-inverse_standardize_nowcasts <- function(nowcast_list, mean_Y, sd_Y) {
-  lapply(nowcast_list, function(mat) {
-    mat * sd_Y + mean_Y
-  })
-}
-
-
-# ==============================================================================
-# NOT AVAILABLE PERCENTAGE
-# ==============================================================================
-
-nan_percent_Y <- function(Y) {
-  total_values <- length(Y)
-  total_NAs <- sum(is.na(Y))
-  percent <- total_NAs / total_values * 100
-  return(percent)
-}
-
-
-# ==============================================================================
-# GENERAL PREPARATION OF DATA 
-# ==============================================================================
-
-select_base_variable_names <- function(countries, P) {
-  modelM <- P$modelM
-  modelQ <- P$modelQ
+  # Costruzione tabelle per ciascun mese
+  df_M1 <- build_df(roll_nowcast$M1, "M1")
+  df_M2 <- build_df(roll_nowcast$M2, "M2")
+  df_M3 <- build_df(roll_nowcast$M3, "M3")
   
-  model_sizes <- list(
-    small = list(Q = 1, M = 5),  # small: solo GDP tra le trimestrali
-    medium = list(Q = 5, M = 10),
-    large = list(Q = 10, M = 50)
+  # Unione di tutti i nowcast
+  df_all <- bind_rows(df_M1, df_M2, df_M3) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "Nowcast") %>%
+    mutate(Country = factor(Country, levels = country_names))
+  
+  # Serie reale del GDP (solo nei mesi in cui esce: ogni 3 mesi)
+  df_true <- data.frame(
+    Date = DatesM,
+    Y_true_gdp = Y_true[ , , gdp_idx]
   )
+  colnames(df_true)[-1] <- country_names
+  df_true <- df_true %>%
+    slice(seq(3, n(), by = 3)) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "True")
   
-  n_m <- model_sizes[[tolower(modelM)]]$M
-  n_q <- model_sizes[[tolower(modelQ)]]$Q
+  # Merge tra nowcast e serie reale
+  plot_df <- left_join(df_all, df_true, by = c("Date", "Country"))
   
-  selected_m_names <- c()
-  selected_q_names <- c()
-  
-  for (cc in countries) {
-    DataFile <- paste0("Data/", cc, "/Processed/Data_", cc, ".xlsx")
-    monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong")
-    quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong")
-    
-    DataM <- monthly_data[, -1]
-    DataQ <- quarterly_data[, -1]
-    
-    gdp_q_idx <- which(grepl("^GDP_", colnames(DataQ), ignore.case = TRUE))[1]
-    gdp_q <- DataQ[[gdp_q_idx]]
-    gdp_rep <- rep(gdp_q, each = 3)[1:nrow(DataM)]
-    
-    # Correlazioni mensili
-    cors_m <- apply(DataM, 2, function(x) suppressWarnings(cor(x, gdp_rep, use = "pairwise.complete.obs")))
-    top_m <- names(cors_m)[order(abs(cors_m), decreasing = TRUE)[1:min(n_m, length(cors_m))]]
-    
-    # Correlazioni trimestrali (solo se medium/large)
-    top_q <- NULL
-    if (n_q > 1) {
-      cors_q <- apply(DataQ[, -gdp_q_idx], 2, function(x) suppressWarnings(cor(x, gdp_q, use = "pairwise.complete.obs")))
-      top_q <- names(DataQ)[-gdp_q_idx][order(abs(cors_q), decreasing = TRUE)[1:min(n_q, length(cors_q))]]
-    }
-    
-    # Rimozione suffisso paese
-    base_m <- gsub(paste0("_", cc, "$"), "", top_m)
-    base_q <- if (!is.null(top_q)) gsub(paste0("_", cc, "$"), "", top_q) else character()
-    
-    selected_m_names <- union(selected_m_names, base_m)
-    selected_q_names <- union(selected_q_names, base_q)
-  }
-  
-  # Per modello small: trimestrali = solo GDP
-  if (n_q == 1) {
-    selected_q_names <- "GDP"
-  }
-  
-  return(list(monthly = selected_m_names, quarterly = selected_q_names))
+  # Plot
+  ggplot(plot_df, aes(x = Date)) +
+    geom_line(aes(y = Nowcast, color = Month), linewidth = 1) +
+    geom_point(aes(y = True), color = "black", size = 2, shape = 16, na.rm = TRUE) +
+    facet_wrap(~ Country, scales = "free_y") +
+    labs(
+      title = "Nowcast del GDP vs Valori Reali per Paese",
+      x = "Data", y = "GDP",
+      color = "Mese del Trimestre"
+    ) +
+    scale_color_manual(values = c("M1" = "steelblue", "M2" = "orange", "M3" = "darkgreen")) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "bottom")
 }
 
-filter_common_variables_across_countries <- function(countries, selected_base_m, selected_base_q) {
-  valid_m_vars <- list()
-  valid_q_vars <- list()
-  
-  for (cc in countries) {
-    DataFile <- paste0("Data/", cc, "/Processed/Data_", cc, ".xlsx")
-    monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong")
-    quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong")
-    
-    DataM <- monthly_data[, -1]
-    DataQ <- quarterly_data[, -1]
-    
-    col_m <- colnames(DataM)
-    col_q <- colnames(DataQ)
-    
-    # Rimuove suffisso country e costruisce mappa
-    base_m <- gsub(paste0("_", cc, "$"), "", col_m)
-    base_q <- gsub(paste0("_", cc, "$"), "", col_q)
-    
-    matched_m <- selected_base_m[selected_base_m %in% base_m]
-    matched_q <- selected_base_q[selected_base_q %in% base_q]
-    
-    # Mapping: base → full
-    matched_full_m <- setNames(paste0(matched_m, "_", cc), matched_m)
-    matched_full_q <- setNames(paste0(matched_q, "_", cc), matched_q)
-    
-    valid_m_vars[[cc]] <- matched_full_m
-    valid_q_vars[[cc]] <- matched_full_q
-  }
-  
-  # Trova solo i base_name presenti in tutti i paesi
-  common_base_m <- Reduce(intersect, lapply(valid_m_vars, names))
-  common_base_q <- Reduce(intersect, lapply(valid_q_vars, names))
-  
-  # Per ogni paese, ritorna solo le variabili comuni
-  filtered_vars_m <- lapply(valid_m_vars, function(x) x[common_base_m])
-  filtered_vars_q <- lapply(valid_q_vars, function(x) x[common_base_q])
-  
-  return(list(monthly = filtered_vars_m, quarterly = filtered_vars_q))
-}
+# =============================================================================
+# Plot Nowcast Pre and Post Covid
+# =============================================================================
 
-prepare_country_data <- function(country_code, P, selected_vars_m, selected_vars_q) {
-  # ---- PATHS ----
-  DataFile <- paste0("Data/", country_code, "/Processed/Data_", country_code, ".xlsx")
-  LegendFile <- paste0("Data/", country_code, "/Original/Legend_", country_code, ".xlsx")
+plot_nowcast_vs_true_gdp_filtered <- function(roll_nowcast, Y_true, gdp_idx, DatesM, 
+                                              month_filter = c("M1", "M2", "M3"),
+                                              start_date,
+                                              end_date) {
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
   
-  # ---- MONTHLY DATA ----
-  monthly_data <- readxl::read_excel(DataFile, sheet = "MonthlyLong", col_names = TRUE)
-  DatesM <- as.Date(monthly_data[[1]])
-  DataM <- monthly_data[, -1]
-  vars_m_country <- selected_vars_m[[country_code]]
-  DataM <- DataM[, vars_m_country]
+  p1 <- dim(Y_true)[2]
+  country_names <- paste0("Country_", 1:p1)
   
-  # Monthly Legend: recupera la classe delle variabili selezionate
-  legend_m <- readxl::read_excel(LegendFile, sheet = "MDescriptionFull")
-  idx_m <- match(vars_m_country, legend_m[[1]])  # prima colonna = nomi variabili
-  ClassM <- legend_m$Class[idx_m]
-  TransfM <- floor(legend_m[idx_m, 8])
-  GroupM <- legend_m$M1[idx_m]
-  
-  # Annualization for monthly
-  DataMTrf <- DataM
-  annualize_idx <- which(TransfM[[1]] %in% c(2, 4))
-  DataMTrf[, annualize_idx] <- DataMTrf[, annualize_idx] * 100
-
-  # ---- COVID MASK SOLO SU VARIABILI REALI ----
-  CovidNaN <- function(data, dates, class, start_covid, end_covid) {
-    real_idx <- which(grepl("r", tolower(class)))
-    mask <- dates >= as.Date(as.yearmon(start_covid)) & dates <= as.Date(as.yearmon(end_covid))
-    covid_matrix <- matrix(FALSE, nrow = nrow(data), ncol = ncol(data))
-    covid_matrix[mask, real_idx] <- TRUE
-    data[covid_matrix] <- NA
-    list(data, covid_matrix)
-  }
-  resM <- CovidNaN(DataMTrf, DatesM, ClassM, P$covid_start, P$covid_end)
-  DataMTrf <- resM[[1]]
-  Covid_obsM <- resM[[2]]
-  T_M <- nrow(DataMTrf)
-  
-  # ---- QUARTERLY DATA ----
-  quarterly_data <- readxl::read_excel(DataFile, sheet = "QuarterlyLong", col_names = TRUE)
-  DatesQ <- as.Date(quarterly_data[[1]])
-  DataQ <- quarterly_data[, -1]
-  vars_q_country <- selected_vars_q[[country_code]]
-  DataQ <- DataQ[, vars_q_country]
-  
-  # Quarterly Legend
-  legend_q <- readxl::read_excel(LegendFile, sheet = "QDescriptionFull")
-  idx_q <- match(vars_q_country, legend_q[[1]])  # prima colonna = nomi variabili
-  ClassQ <- legend_q$Class[idx_q]
-  TransfQ <- floor(legend_q[idx_q, 8])
-  GroupQ <- legend_q$M1[idx_q]
-  
-  
-  DataQTrf <- DataQ
-  annualize_idx <- which(TransfQ[[1]] %in% c(2, 4))
-  DataQTrf[, annualize_idx] <- DataQTrf[, annualize_idx] * 100
-  
-  resQ <- CovidNaN(DataQTrf, DatesQ, ClassQ, P$covid_start, P$covid_end)
-  DataQTrf <- resQ[[1]]
-  Covid_obsQ <- resQ[[2]]
-  
-  # ---- ESPANSIONE TRIMESTRALE A MENSILE ----
-  DataQMTrf <- do.call(rbind, lapply(1:nrow(DataQTrf), function(i) {
-    rbind(rep(NA, ncol(DataQTrf)),
-          rep(NA, ncol(DataQTrf)),
-          DataQTrf[i, ])
-  }))
-  T_Q <- nrow(DataQMTrf)
-  
-  # ---- UNIFICA LUNGHEZZA ----
-  T_final <- max(T_M, T_Q)
-  if (T_M < T_final) {
-    paddingM <- data.frame(matrix(NA, T_final - T_M, ncol(DataMTrf)))
-    colnames(paddingM) <- colnames(DataMTrf)
-    DataMTrf <- rbind(DataMTrf, paddingM)
-  }
-  if (T_Q < T_final) {
-    paddingQ <- data.frame(matrix(NA, T_final - T_Q, ncol(DataQMTrf)))
-    colnames(paddingQ) <- colnames(DataQMTrf)
-    DataQMTrf <- rbind(DataQMTrf, paddingQ)
+  # Helper per costruire il dataframe da ogni lista di nowcast
+  build_df <- function(nc_list, label) {
+    df <- data.frame(
+      Date = as.Date(names(nc_list)),
+      do.call(rbind, nc_list)
+    )
+    colnames(df)[-1] <- country_names
+    df$Month <- label
+    return(df)
   }
   
-  # ---- OUTPUT ----
-  Data <- cbind(DataMTrf, DataQMTrf)
-  Series <- c(vars_m_country, vars_q_country)
-  Group <- c(GroupM, GroupQ)
+  # Costruzione dei dataframe per ciascun mese richiesto
+  df_all <- list()
+  if ("M1" %in% month_filter) df_all <- append(df_all, list(build_df(roll_nowcast$M1, "M1")))
+  if ("M2" %in% month_filter) df_all <- append(df_all, list(build_df(roll_nowcast$M2, "M2")))
+  if ("M3" %in% month_filter) df_all <- append(df_all, list(build_df(roll_nowcast$M3, "M3")))
   
-  result <- list(
-    Data = Data,
-    DatesM = DatesM,
-    DatesQ = DatesQ,
-    Series = Series,
-    UnbalancedPattern = NULL,
-    Covid_obsM = Covid_obsM,
-    Covid_obsQ = Covid_obsQ,
-    Group = Group,
-    Name = paste0("Data_", country_code),
-    quarterly_start_idx = ncol(DataMTrf) + 1
+  df_nowcast <- bind_rows(df_all) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "Nowcast") %>%
+    mutate(Country = factor(Country, levels = country_names)) %>%
+    filter(Date >= start_date, Date <= end_date)
+  
+  # Serie reale del GDP ogni 3 mesi
+  df_true <- data.frame(
+    Date = DatesM,
+    Y_true_gdp = Y_true[ , , gdp_idx]
   )
+  colnames(df_true)[-1] <- country_names
+  df_true <- df_true %>%
+    slice(seq(3, n(), by = 3)) %>%
+    pivot_longer(cols = all_of(country_names), names_to = "Country", values_to = "True")
   
-  assign(result$Name, result$Data, envir = .GlobalEnv)
-  return(result)
+  # Merge nowcast + true GDP
+  plot_df <- left_join(df_nowcast, df_true, by = c("Date", "Country"))
+  
+  # Plot finale
+  ggplot(plot_df, aes(x = Date)) +
+    geom_line(aes(y = Nowcast, color = Month), linewidth = 1) +
+    geom_line(aes(y = True, group = Country), color = "black", linewidth = 0.8, na.rm = TRUE) +
+    geom_point(aes(y = True), color = "black", size = 2, shape = 16, na.rm = TRUE) +
+    facet_wrap(~ Country, scales = "free_y") +
+    labs(
+      title = "Nowcast del GDP vs Valori Reali",
+      x = "Data", y = "GDP",
+      color = "Mese del Trimestre"
+    ) +
+    scale_color_manual(values = c("M1" = "steelblue", "M2" = "orange", "M3" = "darkgreen")) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "bottom")
 }
 
-# ==============================================================================
-# REMOVE COUNTRY CODES FROM VARIABLES NAME
+
+# ============================================================================== 
+# RMSFE pre post covid 
 # ==============================================================================
 
-# Funzione per rimuovere suffissi paese
-remove_country_code <- function(names, ccodes) {
-  pattern <- paste0("_(", paste(ccodes, collapse = "|"), ")$")
-  gsub(pattern, "", names)
-}
-
-# ==============================================================================
-# BUILD METRIX-VARIATE DATA
-# ==============================================================================
-
-tensor_data <- function(countries, P) {
-  T_max <- P$Tmax
+compute_rmsfe_period <- function(nowcast_list, Y_true, gdp_idx, DatesM, start_date, end_date) {
+  dates_vec <- as.Date(names(nowcast_list))
+  p1 <- dim(Y_true)[2]
+  rmsfe_mat <- matrix(NA, nrow = p1, ncol = length(dates_vec))
   
-  # Carica i dataset per ciascun paese
-  data_list <- lapply(countries, function(cc) get(paste0("Data_", cc)))
-  names(data_list) <- countries
-  
-  # Rimuove i codici paese dalle colonne
-  cleaned_data_list <- list()
-  for (i in seq_along(countries)) {
-    cc <- countries[i]
-    data <- data_list[[cc]]
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    if (date_t < start_date || date_t > end_date) next
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
     
-    # Tronca a Tmax osservazioni se serve
-    if (nrow(data) > T_max) {
-      data <- data[1:T_max, ]
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1
+    if (t_gdp_true > dim(Y_true)[1]) next
+    
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        rmsfe_mat[j, i] <- (forecast - actual)^2
+      }
     }
-    
-    colnames(data) <- remove_country_code(colnames(data), countries)
-    cleaned_data_list[[cc]] <- data
   }
+  sqrt(rowMeans(rmsfe_mat, na.rm = TRUE))
+}
+
+compute_rmsfe_long_period <- function(nowcast_list, Y_true, gdp_idx, DatesM, month_label = "M1",
+                                      start_date, end_date) {
+  dates_vec <- as.Date(names(nowcast_list))
+  p1 <- dim(Y_true)[2]
+  df <- data.frame()
   
-  # Trova tutte le variabili comuni
-  all_vars <- unique(unlist(lapply(cleaned_data_list, colnames)))
-  
-  # Crea tensor Y
-  Y <- array(NA, dim = c(T_max, length(countries), length(all_vars)),
-             dimnames = list(
-               format(res$DatesM[1:T_max], "%Y-%m"),
-               countries,
-               all_vars
-             ))
-  
-  # Allinea le variabili per ciascun paese
-  for (i in seq_along(countries)) {
-    cc <- countries[i]
-    data <- cleaned_data_list[[cc]]
+  for (i in seq_along(dates_vec)) {
+    date_t <- dates_vec[i]
+    if (date_t < start_date || date_t > end_date) next
+    t <- which(DatesM == date_t)
+    if (length(t) == 0) next
     
-    # Nuova matrice con tutte le variabili, NA dove mancano
-    aligned_data <- matrix(NA, nrow = T_max, ncol = length(all_vars))
-    colnames(aligned_data) <- all_vars
-    matched_vars <- intersect(colnames(data), all_vars)
-    aligned_data[1:nrow(data), matched_vars] <- as.matrix(data[, matched_vars])
+    m_trimestre <- (as.integer(format(date_t, "%m")) - 1) %% 3 + 1
+    t_gdp_true <- t + (3 - m_trimestre) + 1
+    if (t_gdp_true > dim(Y_true)[1]) next
     
-    Y[, i, ] <- aligned_data
+    for (j in 1:p1) {
+      forecast <- nowcast_list[[i]][j]
+      actual <- Y_true[t_gdp_true, j, gdp_idx]
+      if (!is.na(actual) && !is.na(forecast)) {
+        err <- forecast - actual
+        df <- rbind(df, data.frame(
+          Country = paste0("Country_", j),
+          Date = date_t,
+          Month = month_label,
+          Error = err,
+          RMSFE = sqrt(err^2)
+        ))
+      }
+    }
   }
-  
-  # Crea matrice W (1 se osservato, 0 se NA)
-  W <- ifelse(is.na(Y), 0, 1)
-  
-  return(list(Y = Y, W = W))
+  return(df)
 }
